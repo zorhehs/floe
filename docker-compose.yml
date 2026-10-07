@@ -1,0 +1,345 @@
+# Lakehouse with CDC ingestion:
+# PostgreSQL -> Debezium (Kafka Connect) -> Kafka -> Spark Structured Streaming
+#   -> Apache Iceberg (REST catalog, MinIO/S3) -> Trino; Airflow runs optimisation.
+#
+# Memory limits are sized for Docker Desktop with 8 GB (steady state ~6 GB); 10-12 GB gives
+# comfortable headroom. Limits are upper bounds: the VM must not run out of memory as a whole.
+
+x-aws-env: &aws-env
+  AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+  AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+  AWS_REGION: ${AWS_REGION}
+
+x-build: &build
+  context: .
+  dockerfile: config/docker/Dockerfile
+
+services:
+  # ------------------------------------------------------------- source OLTP
+  postgres:
+    image: postgres:16
+    command: >
+      postgres -c wal_level=logical -c max_replication_slots=4 -c max_wal_senders=4
+               -c max_slot_wal_keep_size=4GB -c shared_buffers=128MB
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      APP_DB_USER: ${APP_DB_USER}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+      DEBEZIUM_DB_USER: ${DEBEZIUM_DB_USER}
+      DEBEZIUM_DB_PASSWORD: ${DEBEZIUM_DB_PASSWORD}
+      CATALOG_DB_USER: ${CATALOG_DB_USER}
+      CATALOG_DB_PASSWORD: ${CATALOG_DB_PASSWORD}
+    ports: ["5433:5432"]
+    volumes:
+      - ./config/postgres/init:/docker-entrypoint-initdb.d:ro
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ${POSTGRES_DB}"]
+      interval: 5s
+      retries: 20
+    mem_limit: 512m
+    restart: unless-stopped
+
+  # ------------------------------------------------------------- CDC transport
+  kafka:
+    image: apache/kafka:3.9.1
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 1
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_HEAP_OPTS: -Xms384m -Xmx384m
+      CLUSTER_ID: lakehouse-kraft-cluster-01
+    ports: ["29092:29092"]
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null"]
+      interval: 10s
+      timeout: 20s
+      retries: 20
+    mem_limit: 768m
+    restart: unless-stopped
+
+  connect:
+    image: quay.io/debezium/connect:2.7.3.Final
+    depends_on:
+      kafka: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: lakehouse-connect
+      CONFIG_STORAGE_TOPIC: connect_configs
+      OFFSET_STORAGE_TOPIC: connect_offsets
+      STATUS_STORAGE_TOPIC: connect_statuses
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+      HEAP_OPTS: -Xms256m -Xmx896m
+      # Debezium JSON envelopes carry their schema: compress them on the wire/disk.
+      CONNECT_PRODUCER_COMPRESSION_TYPE: zstd
+      CONNECT_PRODUCER_LINGER_MS: 50
+      # Lets the connector config reference ${env:...} instead of literal secrets.
+      CONNECT_CONFIG_PROVIDERS: env
+      CONNECT_CONFIG_PROVIDERS_ENV_CLASS: org.apache.kafka.common.config.provider.EnvVarConfigProvider
+      POSTGRES_DB: ${POSTGRES_DB}
+      DEBEZIUM_DB_USER: ${DEBEZIUM_DB_USER}
+      DEBEZIUM_DB_PASSWORD: ${DEBEZIUM_DB_PASSWORD}
+    ports: ["8083:8083"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8083/connectors >/dev/null"]
+      interval: 10s
+      retries: 30
+    mem_limit: 1280m
+    restart: unless-stopped
+
+  connect-init:
+    image: curlimages/curl:8.11.1
+    depends_on:
+      connect: {condition: service_healthy}
+    entrypoint: ["/bin/sh", "/debezium/register.sh"]
+    volumes:
+      - ./config/debezium:/debezium:ro
+    restart: on-failure
+
+  # ------------------------------------------------------------- lake storage
+  minio:
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_PROMETHEUS_AUTH_TYPE: public
+    ports: ["9000:9000", "9001:9001"]
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9000/minio/health/live || mc ready local"]
+      interval: 5s
+      retries: 20
+    mem_limit: 512m
+    restart: unless-stopped
+
+  minio-init:
+    image: pgsty/mc:RELEASE.2026-09-16T00-00-00Z
+    depends_on:
+      minio: {condition: service_healthy}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}" &&
+        mc mb --ignore-existing local/${WAREHOUSE_BUCKET} &&
+        echo "bucket ${WAREHOUSE_BUCKET} ready"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    restart: on-failure
+
+  iceberg-rest:
+    image: apache/iceberg-rest-fixture:1.9.2
+    depends_on:
+      minio-init: {condition: service_completed_successfully}
+      postgres: {condition: service_healthy}
+    # Stock image + PostgreSQL JDBC driver on the classpath: the catalog keeps its
+    # metadata pointers in PostgreSQL (safe for concurrent commits; SQLite is not).
+    command: ["java", "-cp", "/usr/lib/iceberg-rest/iceberg-rest-adapter.jar:/opt/catalog-jars/*",
+              "org.apache.iceberg.rest.RESTCatalogServer"]
+    environment:
+      <<: *aws-env
+      CATALOG_WAREHOUSE: s3://${WAREHOUSE_BUCKET}/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+      CATALOG_URI: jdbc:postgresql://postgres:5432/iceberg_catalog
+      CATALOG_JDBC_USER: ${CATALOG_DB_USER}
+      CATALOG_JDBC_PASSWORD: ${CATALOG_DB_PASSWORD}
+      CATALOG_JDBC_SCHEMA__VERSION: V1
+      JAVA_TOOL_OPTIONS: -Xmx256m
+    ports: ["8181:8181"]
+    volumes:
+      - ./config/docker/catalog-jars:/opt/catalog-jars:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8181/v1/config >/dev/null || exit 1"]
+      interval: 10s
+      retries: 20
+    mem_limit: 512m
+    restart: unless-stopped
+
+  # ------------------------------------------------------------- ingestion
+  spark-streaming:
+    build: {<<: *build, target: spark}
+    image: floe/spark:latest
+    depends_on:
+      kafka: {condition: service_healthy}
+      iceberg-rest: {condition: service_healthy}
+      connect-init: {condition: service_completed_successfully}
+    command:
+      - spark-submit
+      - --master
+      - local[3]
+      - --driver-memory
+      - 1g
+      - /opt/jobs/cdc_to_iceberg.py
+    environment:
+      <<: *aws-env
+      KAFKA_BOOTSTRAP: kafka:9092
+      TRIGGER_INTERVAL: ${TRIGGER_INTERVAL}
+      MAX_OFFSETS_PER_TRIGGER: ${MAX_OFFSETS_PER_TRIGGER}
+    ports: ["4040:4040"]
+    volumes:
+      - ./src/topologies/spark:/opt/jobs:ro
+      - ./config/spark:/opt/spark/conf:ro
+      - spark-checkpoints:/opt/checkpoints
+    mem_limit: 1792m   # 1 GB driver heap + JVM off-heap + Python worker
+    restart: unless-stopped
+
+  # ------------------------------------------------------------- query engine
+  trino:
+    image: trinodb/trino:476
+    depends_on:
+      iceberg-rest: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+    environment:
+      <<: *aws-env
+      POSTGRES_DB: ${POSTGRES_DB}
+      APP_DB_USER: ${APP_DB_USER}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+    ports: ["8080:8080"]
+    volumes:
+      - ./config/trino/catalog:/etc/trino/catalog:ro
+      - ./config/trino/config.properties:/etc/trino/config.properties:ro
+      - ./config/trino/jvm.config:/etc/trino/jvm.config:ro
+      - ./src/consumers/queries:/opt/queries:ro
+    mem_limit: 1536m
+    restart: unless-stopped
+
+  # ------------------------------------------------------------- orchestration
+  airflow:
+    build: {<<: *build, target: airflow}
+    image: floe/airflow:latest
+    depends_on:
+      iceberg-rest: {condition: service_healthy}
+    environment:
+      <<: *aws-env
+      AIRFLOW_ADMIN_USER: ${AIRFLOW_ADMIN_USER}
+      AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
+      AIRFLOW__WEBSERVER__WORKERS: 1
+      AIRFLOW__WEBSERVER__SECRET_KEY: lakehouse-local-dev-secret
+      AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: 30
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/state/airflow.db
+      MPLCONFIGDIR: /tmp/matplotlib
+    ports: ["8088:8080"]
+    volumes:
+      - ./src/topologies/airflow:/opt/airflow/dags:ro
+      - ./src/topologies/spark:/opt/jobs:ro
+      - ./config/spark:/opt/spark/conf:ro
+      - ./results:/opt/results
+      - airflow-home:/opt/airflow/state
+    mem_limit: 2816m   # Airflow (~0.7 GB) + one local-mode Spark maintenance job (1.2 GB heap + capped off-heap)
+    restart: unless-stopped
+
+  # ------------------------------------------------------------- tools (on demand)
+  tools:
+    build: {<<: *build, target: tools}
+    image: floe/tools:latest
+    profiles: ["tools"]
+    environment: &tools-env
+      <<: *aws-env
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB}
+      APP_DB_USER: ${APP_DB_USER}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+      TRINO_HOST: trino
+      AIRFLOW_URL: http://airflow:8080
+      AIRFLOW_ADMIN_USER: ${AIRFLOW_ADMIN_USER}
+      AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD}
+      S3_ENDPOINT: http://minio:9000
+      WAREHOUSE_BUCKET: ${WAREHOUSE_BUCKET}
+      TPCH_SCALE: ${TPCH_SCALE}
+      REPORTS_DIR: /opt/results
+      MPLCONFIGDIR: /tmp/matplotlib
+    volumes:
+      - ./src:/opt/src:ro
+      - ./src/consumers/queries:/opt/queries:ro
+      - ./results:/opt/results
+
+  generator:
+    image: floe/tools:latest
+    profiles: ["workload"]
+    command: ["python3", "-m", "producer.generator"]
+    environment:
+      <<: *tools-env
+      WORKLOAD_OPS_PER_SEC: ${WORKLOAD_OPS_PER_SEC}
+    volumes:
+      - ./src:/opt/src:ro
+    mem_limit: 256m
+    restart: unless-stopped
+
+  # ------------------------------------------------------------- monitoring
+  exporter:
+    image: floe/tools:latest
+    command: ["python3", "-m", "consumers.exporter"]
+    depends_on:
+      trino: {condition: service_started}
+      postgres: {condition: service_healthy}
+    environment:
+      <<: *tools-env
+      CONNECT_URL: http://connect:8083
+    volumes:
+      - ./src:/opt/src:ro
+    mem_limit: 192m
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    ports: ["9090:9090"]
+    volumes:
+      - ./config/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./config/monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    mem_limit: 256m
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    depends_on: [prometheus]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/lakehouse.json
+    ports: ["3000:3000"]
+    volumes:
+      - ./config/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    mem_limit: 384m
+    restart: unless-stopped
+
+volumes:
+  pg-data:
+  kafka-data:
+  minio-data:
+  spark-checkpoints:
+  airflow-home:
+  prometheus-data:
+  grafana-data:

@@ -1,0 +1,9 @@
+*
+!config/docker/jars/*.jar
+!config/docker/Dockerfile
+!config/docker/requirements-tools.txt
+!config/docker/constraints-airflow-2.10.5-py3.10.txt
+!config/docker/airflow-entrypoint.sh
+!config/spark/**
+!src/**
+**/__pycache__

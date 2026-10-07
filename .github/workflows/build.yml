@@ -1,0 +1,62 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      integration:
+        description: "Run the full-stack integration test"
+        type: boolean
+        default: true
+
+jobs:
+  lint-and-unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.10"}
+      - uses: actions/setup-java@v4
+        with: {distribution: temurin, java-version: "17"}
+      - name: Install dependencies
+        run: |
+          pip install pyspark==3.5.6 pytest ruff -r config/docker/requirements-tools.txt
+      - name: Lint (ruff)
+        run: ruff check src tests
+      - name: Compile all Python
+        run: python -m compileall -q src tests
+      - name: Shell syntax
+        run: for f in scripts/*.sh scripts/demos/*.sh tests/integration/*.sh config/postgres/init/*.sh; do bash -n "$f"; done
+      - name: Unit tests
+        run: pytest -q tests/unit
+      - name: Validate docker-compose.yml
+        run: cp .env.example .env && docker compose --profile tools --profile workload config -q
+
+  build-images:
+    runs-on: ubuntu-latest
+    needs: lint-and-unit-tests
+    steps:
+      - uses: actions/checkout@v4
+      - run: cp .env.example .env
+      - run: ./scripts/fetch-jars.sh
+      - name: Build spark / tools / airflow images
+        run: docker compose --profile tools build
+
+  integration:
+    if: github.event_name == 'workflow_dispatch' && inputs.integration || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    needs: build-images
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - run: cp .env.example .env && echo "TPCH_SCALE=tiny" >> .env
+      - run: ./scripts/fetch-jars.sh
+      - run: docker compose --profile tools build
+      - name: Full pipeline integration test
+        run: ./tests/integration/test_pipeline.sh
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --tail 200

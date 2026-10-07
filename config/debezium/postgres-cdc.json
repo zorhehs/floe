@@ -1,0 +1,35 @@
+{
+  "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+  "tasks.max": "1",
+
+  "database.hostname": "postgres",
+  "database.port": "5432",
+  "database.user": "${env:DEBEZIUM_DB_USER}",
+  "database.password": "${env:DEBEZIUM_DB_PASSWORD}",
+  "database.dbname": "${env:POSTGRES_DB}",
+
+  "topic.prefix": "pg",
+  "schema.include.list": "shop",
+
+  "plugin.name": "pgoutput",
+  "publication.name": "dbz_publication",
+  "publication.autocreate.mode": "disabled",
+  "slot.name": "debezium_shop",
+  "snapshot.mode": "initial",
+
+  "decimal.handling.mode": "string",
+  "column.propagate.source.type": "shop\\..*",
+  "time.precision.mode": "adaptive",
+  "tombstones.on.delete": "false",
+
+  "heartbeat.interval.ms": "10000",
+  "max.batch.size": "4096",
+  "max.queue.size": "16384",
+  "max.queue.size.in.bytes": "134217728",
+  "poll.interval.ms": "200",
+
+  "topic.creation.default.replication.factor": "1",
+  "topic.creation.default.partitions": "1",
+  "topic.creation.default.compression.type": "zstd",
+  "topic.creation.default.retention.ms": "604800000"
+}

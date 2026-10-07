@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you use this work, please cite it as below."
+title: "Lakehouse Architecture with Apache Iceberg, Spark and Trino using CDC Ingestion"
+type: software
+authors:
+  - family-names: Zulfiqar
+    given-names: Aliyan
+  - family-names: Riaz
+    given-names: Sehrosh
+version: 1.0.0
+license: MIT
+keywords: [lakehouse, apache-iceberg, apache-spark, trino, debezium, kafka, change-data-capture]

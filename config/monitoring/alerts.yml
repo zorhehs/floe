@@ -1,0 +1,23 @@
+groups:
+  - name: lakehouse
+    rules:
+      - alert: CdcFreshnessHigh
+        expr: lakehouse_cdc_freshness_seconds > 120
+        for: 2m
+        annotations: {summary: "Iceberg is more than 2 minutes behind PostgreSQL"}
+      - alert: DebeziumConnectorDown
+        expr: lakehouse_connector_running == 0
+        for: 1m
+        annotations: {summary: "Debezium connector or task not RUNNING"}
+      - alert: ReplicationSlotLagHigh
+        expr: lakehouse_replication_slot_lag_bytes > 512 * 1024 * 1024
+        for: 5m
+        annotations: {summary: "WAL retained for Debezium exceeds 512 MB"}
+      - alert: SmallFilesAccumulating
+        expr: lakehouse_iceberg_files{content="data"} > 500 and lakehouse_iceberg_avg_data_file_bytes < 8 * 1024 * 1024
+        for: 10m
+        annotations: {summary: "Many small data files - run compaction (iceberg_maintenance DAG)"}
+      - alert: StreamingStalled
+        expr: lakehouse_ingest_last_batch_age_seconds > 600 and lakehouse_replication_slot_lag_bytes > 10 * 1024 * 1024
+        for: 2m
+        annotations: {summary: "No micro-batch committed for 10 minutes while changes are pending"}

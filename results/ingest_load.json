@@ -1,0 +1,15 @@
+{
+  "measured_at": "2026-10-07T18:04:54.500356+00:00",
+  "scale": "sf1",
+  "rows_loaded": {
+    "region": 5,
+    "nation": 25,
+    "customer": 150000,
+    "orders": 1500000
+  },
+  "total_rows": 1650030,
+  "postgres_load_seconds": 27.1,
+  "seconds_until_queryable_in_lakehouse": 340.7,
+  "end_to_end_rows_per_second": 4843.5,
+  "consistent": true
+}

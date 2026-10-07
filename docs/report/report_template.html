@@ -1,0 +1,494 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Floe — CDC lakehouse on Apache Iceberg, Spark and Trino (technical report)</title>
+<style>
+  /* Neutral ink + one accent, used sparingly (rules, hero panel, page line). */
+  :root { --ink:#121417; --body:#2b2f36; --muted:#6b7280; --faint:#9aa1ab; --line:#e3e6ea; --panel:#f3f4f6;
+          --accent:#3b8ff3; --pass:#2f9e44; --alert:#d6336c; --black:#0d0e10; }
+  @page { size: A4; margin: 17mm 17mm 20mm 17mm;
+    @bottom-left { content: counter(page, decimal-leading-zero); font: 600 9pt "Avenir Next", "Helvetica Neue", sans-serif;
+                   color: var(--ink); border-top: 1.4pt solid var(--accent); padding-top: 3pt; width: 14mm; vertical-align: top; }
+    @bottom-center { content: "Floe · CDC lakehouse · SE-315 Group 04"; font: 400 7.5pt "Avenir Next", sans-serif;
+                     color: #9aa1ab; vertical-align: top; padding-top: 4pt; text-align: left; }
+  }
+  @page :first { margin: 0; @bottom-left { content: none; border: none; } @bottom-center { content: none; } }
+  * { box-sizing: border-box; }
+  body { font-family: "Avenir Next", "Helvetica Neue", Arial, sans-serif; color: var(--body); font-size: 9.3pt;
+         line-height: 1.48; margin: 0; font-weight: 400; }
+  b, strong { color: var(--ink); font-weight: 600; }
+  h1 { font-size: 17pt; font-weight: 700; color: var(--ink); letter-spacing: -0.01em; margin: 18pt 0 9pt;
+       break-after: avoid; }
+  h1::after { content: ""; display: block; width: 20mm; height: 2pt; background: var(--accent); margin-top: 6pt; }
+  h1 .num { color: var(--faint); font-weight: 500; margin-right: 6pt; }
+  h2 { font-size: 11pt; font-weight: 600; color: var(--ink); margin: 13pt 0 4pt; break-after: avoid; }
+  p { margin: 0 0 6pt; text-align: left; }
+  ul, ol { margin: 0 0 7pt 15pt; padding: 0; } li { margin-bottom: 2.5pt; }
+  code { font-family: "SF Mono", Menlo, monospace; font-size: 8.2pt; color: var(--ink); background: var(--panel);
+         padding: 0.5pt 3pt; border-radius: 3px; }
+  pre { font-family: "SF Mono", Menlo, monospace; font-size: 7.6pt; line-height: 1.35; color: #e8eaed; background: var(--black);
+        border-radius: 6px; padding: 9pt 11pt; white-space: pre-wrap; margin: 5pt 0 9pt; break-inside: avoid; }
+  /* Tables: no filled headers - small grey labels and hairlines */
+  table { border-collapse: collapse; width: 100%; margin: 4pt 0 9pt; font-size: 8.5pt; break-inside: avoid; }
+  th { text-align: left; font-weight: 500; color: var(--muted); font-size: 7.6pt; padding: 0 6pt 5pt 0;
+       border-bottom: 1.2pt solid var(--ink); }
+  td { padding: 4.5pt 6pt 4.5pt 0; border-bottom: 1px solid var(--line); vertical-align: top; color: var(--ink); }
+  table.num td:not(:nth-child(1)):not(:nth-child(2)) { text-align: right; font-variant-numeric: tabular-nums; }
+  table.num th:not(:nth-child(1)):not(:nth-child(2)) { text-align: right; }
+  figure { margin: 8pt 0 11pt; break-inside: avoid; }
+  figure img, figure svg { max-width: 100%; display: block; margin: 0 auto; }
+  figure img { max-height: 60mm; }
+  .caption, .tcap { font-size: 7.6pt; color: var(--muted); margin-top: 4pt; }
+  .caption b, .tcap b { color: var(--ink); font-weight: 600; }
+  .tcap { margin: -5pt 0 10pt; }
+  .two { display: grid; grid-template-columns: 1fr 1.25fr; gap: 14pt; align-items: start; }
+  .small { font-size: 8.4pt; }
+  .label { font-size: 7.4pt; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600; }
+  /* Grey rounded info panels (run information / quality control) */
+  .panel { background: var(--panel); border-radius: 6px; padding: 9pt 12pt; margin: 6pt 0 11pt; break-inside: avoid; }
+  .panels { display: grid; grid-template-columns: 0.9fr 1.6fr; gap: 10pt; margin: 6pt 0 12pt; }
+  .panels .panel { margin: 0; }
+  .kv { display: grid; grid-template-columns: 30mm 1fr; row-gap: 2.5pt; font-size: 8.3pt; }
+  .kv span:nth-child(odd) { color: var(--muted); }
+  .kv span:nth-child(even) { color: var(--ink); font-weight: 500; }
+  .qc { display: grid; grid-template-columns: repeat(2, 1fr); column-gap: 16pt; row-gap: 2.5pt; font-size: 8.3pt; }
+  .qc div { display: flex; justify-content: space-between; border-bottom: 1px solid #e6e8eb; padding-bottom: 2pt; }
+  .pass { color: var(--pass); font-weight: 600; } .pass::before { content: "✓ "; }
+  .fail { color: var(--alert); font-weight: 600; }
+  .note { border-left: 2.5pt solid var(--accent); padding: 4pt 0 4pt 10pt; margin: 8pt 0 11pt; break-inside: avoid; }
+  .note .label { display: block; margin-bottom: 2pt; color: var(--ink); }
+  /* Hero: accent panel + black panel (results headline) */
+  .hero { display: grid; grid-template-columns: 1fr 1.25fr; margin: 8pt 0 14pt; break-inside: avoid; }
+  .hero > div { padding: 13pt 15pt 14pt; }
+  .hero .a { background: var(--accent); color: #fff; }
+  .hero .b { background: var(--black); color: #fff; }
+  .hero .k { font-size: 9pt; font-weight: 600; opacity: .95; }
+  .hero .big { font-family: "DIN Alternate", "Avenir Next", sans-serif; font-weight: 700; font-size: 50pt; line-height: 1;
+               margin: 10pt 0 8pt; letter-spacing: -0.02em; }
+  .hero .sub { font-size: 7.8pt; opacity: .9; line-height: 1.45; }
+  .hero ul { list-style: none; margin: 8pt 0 0; padding: 0; }
+  .hero li { display: flex; align-items: baseline; gap: 8pt; margin: 0 0 5pt; font-size: 9pt; }
+  .hero li b { color: #fff; font-family: "DIN Alternate", "Avenir Next", sans-serif; font-size: 17pt; min-width: 27mm; }
+  /* Stat bars: thin grey track with dark fill */
+  .bars { display: grid; grid-template-columns: repeat(2, 1fr); column-gap: 18pt; row-gap: 7pt; margin: 6pt 0 12pt;
+          break-inside: avoid; }
+  .bar .row { display: flex; justify-content: space-between; font-size: 8.6pt; color: var(--ink); }
+  .bar .row b { font-family: "DIN Alternate", "Avenir Next", sans-serif; font-size: 10pt; }
+  .bar .track { height: 3pt; background: var(--line); margin-top: 3pt; }
+  .bar .fill { height: 3pt; background: var(--ink); }
+  .bar.neg .fill { background: var(--alert); }
+  /* Cover */
+  .cover { width: 210mm; height: 297mm; background: var(--black); color: #fff; position: relative;
+           overflow: hidden; break-after: page; }
+  .cover .brand { position: absolute; top: 20mm; left: 20mm; font-size: 10pt; font-weight: 600; letter-spacing: .02em; }
+  .cover .brand span { color: var(--accent); }
+  .cover .dots { position: absolute; top: 14mm; right: 16mm; }
+  .cover .arc { position: absolute; top: -40mm; right: -40mm; width: 120mm; height: 120mm; border-radius: 50%;
+                border: 1pt solid rgba(255,255,255,.10); }
+  .cover .main { position: absolute; left: 20mm; right: 22mm; top: 92mm; }
+  .cover .date { font-size: 9.5pt; color: #c9cdd3; margin-bottom: 7pt; }
+  .cover .t1 { font-size: 40pt; font-weight: 700; line-height: 1.02; letter-spacing: -0.02em; }
+  .cover .t2 { font-size: 27pt; font-weight: 300; line-height: 1.15; margin-top: 4pt; color: #f1f3f5; }
+  .cover .rule { width: 22mm; height: 2pt; background: var(--accent); margin: 15pt 0 13pt; }
+  .cover .lead { font-size: 10pt; color: #c9cdd3; max-width: 120mm; line-height: 1.55; }
+  .cover .meta { position: absolute; left: 20mm; bottom: 34mm; font-size: 8.6pt; color: #c9cdd3; line-height: 1.75; }
+  .cover .meta b { color: #fff; font-weight: 600; display: inline-block; min-width: 30mm; }
+  .cover .foot { position: absolute; left: 0; bottom: 15mm; display: flex; align-items: center; gap: 12pt;
+                 font-size: 8pt; color: #8b9098; }
+  .cover .foot i { display: inline-block; width: 16mm; height: 1.4pt; background: var(--accent); }
+  .cover .foot b { color: #fff; font-weight: 600; font-size: 9pt; }
+  .cover .stack { position: absolute; right: 18mm; bottom: 44mm; opacity: .9; }
+  .pb { break-before: page; }
+  .abstract p { font-size: 10pt; line-height: 1.6; color: var(--ink); }
+</style>
+</head>
+<body>
+
+<section class="cover">
+  <div class="arc"></div>
+  <div class="brand">SE-315 <span>/</span> Cloud Computing</div>
+  <svg class="dots" width="120" height="52" viewBox="0 0 120 52"><circle cx="8" cy="8" r="5.2" fill="none" stroke="rgba(255,255,255,.55)" stroke-width="1.1"/><circle cx="29" cy="8" r="5.2" fill="none" stroke="rgba(255,255,255,.55)" stroke-width="1.1"/><circle cx="50" cy="8" r="5.2" fill="none" stroke="rgba(255,255,255,.55)" stroke-width="1.1"/><circle cx="71" cy="8" r="5.2" fill="none" stroke="rgba(255,255,255,.55)" stroke-width="1.1"/><circle cx="92" cy="8" r="5.2" fill="none" stroke="rgba(255,255,255,.55)" stroke-width="1.1"/><circle cx="113" cy="8" r="5.2" fill="none" stroke="rgba(255,255,255,.55)" stroke-width="1.1"/><circle cx="8" cy="26" r="5.2" fill="none" stroke="rgba(255,255,255,.55)" stroke-width="1.1"/><circle cx="29" cy="26" r="5.2" fill="none" stroke="rgba(255,255,255,.55)" stroke-width="1.1"/><circle cx="50" cy="26" r="5.2" fill="none" stroke="rgba(255,255,255,.55)" stroke-width="1.1"/><circle cx="71" cy="26" r="5.2" fill="none" stroke="rgba(255,255,255,.55)" stroke-width="1.1"/><circle cx="92" cy="26" r="5.2" fill="none" stroke="rgba(255,255,255,.55)" stroke-width="1.1"/><circle cx="113" cy="26" r="5.2" fill="none" stroke="rgba(255,255,255,.55)" stroke-width="1.1"/><circle cx="8" cy="44" r="5.2" fill="none" stroke="rgba(255,255,255,.55)" stroke-width="1.1"/><circle cx="29" cy="44" r="5.2" fill="none" stroke="rgba(255,255,255,.55)" stroke-width="1.1"/><circle cx="50" cy="44" r="5.2" fill="none" stroke="rgba(255,255,255,.55)" stroke-width="1.1"/><circle cx="71" cy="44" r="5.2" fill="none" stroke="rgba(255,255,255,.55)" stroke-width="1.1"/><circle cx="92" cy="44" r="5.2" fill="none" stroke="rgba(255,255,255,.55)" stroke-width="1.1"/><circle cx="113" cy="44" r="5.2" fill="none" stroke="rgba(255,255,255,.55)" stroke-width="1.1"/></svg>
+  <div class="main">
+    <div class="date">Technical report · Group 04</div>
+    <div class="t1">Floe</div>
+    <div class="t2">A CDC lakehouse on Apache Iceberg,<br>Spark and Trino</div>
+    <div class="rule"></div>
+    <div class="lead">Streaming row-level changes from PostgreSQL through Debezium and Kafka into Apache Iceberg,
+      optimised by Airflow and queried with Trino — built, measured and verified end to end.</div>
+  </div>
+  <svg class="stack" width="190" height="150" viewBox="0 0 190 150">
+  <g fill="none" stroke="rgba(255,255,255,.16)" stroke-width="1.2">
+    <rect x="40" y="8" width="120" height="30" rx="4"/><rect x="25" y="52" width="150" height="30" rx="4"/>
+    <rect x="10" y="96" width="170" height="30" rx="4"/></g>
+  <g fill="rgba(255,255,255,.20)"><rect x="52" y="20" width="44" height="6" rx="1"/><rect x="37" y="64" width="64" height="6" rx="1"/>
+    <rect x="22" y="108" width="84" height="6" rx="1"/></g>
+  <rect x="112" y="20" width="36" height="6" rx="1" fill="#3b8ff3"/><rect x="118" y="64" width="44" height="6" rx="1" fill="#3b8ff3" opacity=".8"/>
+  <rect x="124" y="108" width="44" height="6" rx="1" fill="#3b8ff3" opacity=".6"/>
+  <text x="95" y="146" text-anchor="middle" font-size="8" fill="rgba(255,255,255,.35)" font-family="Avenir Next">source · log · lake</text>
+</svg>
+  <div class="meta">
+    <b>Members</b>Aliyan Zulfiqar (Leader), Sehrosh Riaz<br>
+    <b>Assigned project</b>Apache Iceberg + Apache Spark<br>
+    <b>Instructor</b>Dr. Mohsin Raza Jafri<br>
+    <b>Lab engineer</b>Engr. Muhammad Abid Hussain<br>
+    <b>Repository</b>floe
+  </div>
+  <div class="foot"><i></i><b>01</b><span>NBC · Department of Computer Science</span></div>
+</section>
+
+<section class="abstract" style="break-after:auto">
+<h1>Abstract</h1>
+<p>Operational databases are a poor place to run analytics, while classic nightly ETL copies whole tables and delivers stale
+data. We built a lakehouse that continuously replicates row-level changes from PostgreSQL into Apache Iceberg tables and
+serves them to SQL analytics with Trino. Debezium reads the PostgreSQL write-ahead log and publishes change events to
+Kafka; a Spark Structured Streaming job applies each micro-batch to Iceberg with an idempotent <code>MERGE</code>,
+evolving table schemas automatically. Tables live in S3-compatible object storage (MinIO) behind an Iceberg REST catalog.
+Airflow orchestrates Spark maintenance jobs — partition evolution, sorted compaction, delete-file rewriting, snapshot
+expiry and a GDPR-style purge — and Prometheus/Grafana monitor freshness and file health. On TPC-H scale factor 1
+({{load_rows}} rows) the pipeline delivered the full load to Iceberg at {{load_rps}} rows/s end-to-end with
+checksum-verified correctness, and made individual changes queryable with a median end-to-end freshness of
+{{fr_p50}} s. Re-laying out the streamed tables removed all {{delete_files_before}} merge-on-read delete files, cut the number of
+objects in storage by {{objects_saved_pct}} % and made the Trino query suite {{total_speedup}}× faster overall
+(up to {{best_speedup}}× for a single query).</p>
+<p class="small"><b>Keywords:</b> lakehouse, change data capture, Apache Iceberg, Spark Structured Streaming, Debezium, Trino, compaction.</p>
+</section>
+
+<h1><span class="num">01</span>Introduction and motivation</h1>
+<p>Businesses want analytics over the same data their applications are changing right now: orders, balances, inventory.
+Running heavy analytical SQL directly on the operational database competes with transactions, and the traditional
+alternative — exporting full tables to a warehouse every night — is both expensive (every run copies everything) and
+stale (data is up to a day old). A <i>lakehouse</i> combines the low-cost, open-format storage of a data lake with the
+transactional table semantics of a warehouse; <i>change data capture</i> (CDC) feeds it incrementally by reading only
+the changes from the database log.</p>
+<p>The project goal was to implement such a pipeline end-to-end with open-source components and to quantify its
+behaviour. We call the resulting system <b>Floe</b> — like an ice floe, a slab of Iceberg that keeps drifting with the
+flow of changes. The concrete objectives were:</p>
+<ol>
+  <li>Stream inserts, updates and deletes from PostgreSQL into Apache Iceberg tables with Debezium, Kafka and Spark.</li>
+  <li>Keep the lakehouse <b>correct</b> (identical to the source) and <b>fresh</b> (seconds behind), including when the
+      source schema changes.</li>
+  <li>Demonstrate Iceberg's schema evolution, time travel and row-level deletes (including GDPR-style erasure).</li>
+  <li>Counter the small-file problem that streaming creates with compaction and partition optimisation jobs
+      orchestrated by Airflow, and measure query performance and storage before and after.</li>
+  <li>Make the system observable (Prometheus/Grafana), reproducible (Docker Compose, scripts) and tested (unit,
+      integration, CI).</li>
+</ol>
+
+<h1><span class="num">02</span>Background</h1>
+<p><b>Change data capture.</b> PostgreSQL records every committed change in its write-ahead log (WAL). With
+<code>wal_level=logical</code> a <i>logical replication slot</i> decodes the WAL into row changes; Debezium consumes
+the slot through the built-in <code>pgoutput</code> plugin, first snapshots existing rows and then emits one event
+per inserted, updated or deleted row, carrying the new row image, the operation, the commit time and the log sequence
+number (LSN). Because the slot retains WAL until the consumer confirms it, no change is lost while consumers are down.</p>
+<p><b>Apache Iceberg</b> is an open table format: a table is a tree of immutable files — Parquet data files, delete
+files, manifests and a metadata JSON file — and a catalog stores an atomic pointer to the current metadata file. Every
+commit produces a new <i>snapshot</i>, which gives ACID transactions with optimistic concurrency, time travel, schema
+evolution by column ID, and <i>hidden partitioning</i> whose specification can be changed without rewriting old data.
+Format v2 adds row-level deletes: with <i>merge-on-read</i>, an update writes the new row plus a small
+<i>position-delete</i> file instead of rewriting the data file (copy-on-write).</p>
+<p><b>Engines.</b> Spark Structured Streaming processes Kafka in micro-batches with checkpointed offsets; Trino is a
+distributed SQL engine that reads Iceberg tables directly from object storage.</p>
+
+<h1><span class="num">03</span>System architecture</h1>
+<figure>
+<svg viewBox="0 0 760 300" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Avenir Next, Helvetica Neue, Arial" font-size="11">
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#121417"/></marker></defs>
+  <g fill="#f3f4f6" stroke="#121417" stroke-width="0.9">
+    <rect x="5" y="40" width="125" height="58" rx="6"/><rect x="5" y="160" width="125" height="44" rx="6"/>
+    <rect x="160" y="40" width="115" height="58" rx="6"/><rect x="305" y="40" width="105" height="58" rx="6"/>
+    <rect x="440" y="30" width="165" height="78" rx="6"/><rect x="440" y="160" width="165" height="62" rx="6"/>
+    <rect x="645" y="40" width="110" height="58" rx="6"/><rect x="645" y="160" width="110" height="62" rx="6"/>
+    <rect x="245" y="160" width="150" height="62" rx="6"/><rect x="160" y="240" width="290" height="50" rx="6"/>
+  </g>
+  <g text-anchor="middle" fill="#1b1f24">
+    <text x="67" y="62" font-weight="700">PostgreSQL 16</text><text x="67" y="78">OLTP · logical WAL</text><text x="67" y="91" font-size="9.5">publication shop.*</text>
+    <text x="67" y="180" font-weight="700">Workload</text><text x="67" y="195">generator / TPC-H</text>
+    <text x="217" y="62" font-weight="700">Debezium</text><text x="217" y="78">Kafka Connect</text><text x="217" y="91" font-size="9.5">pgoutput slot</text>
+    <text x="357" y="62" font-weight="700">Kafka</text><text x="357" y="78">KRaft</text><text x="357" y="91" font-size="9.5">pg.shop.&lt;table&gt;</text>
+    <text x="522" y="52" font-weight="700">Spark Structured Streaming</text>
+    <text x="522" y="70" font-size="9.5">schema evolution · dedupe</text><text x="522" y="84" font-size="9.5">MERGE INTO (merge-on-read)</text>
+    <text x="522" y="98" font-size="9.5">checkpointed offsets</text>
+    <text x="522" y="180" font-weight="700">Apache Iceberg v2</text><text x="522" y="195">tables + snapshots</text><text x="522" y="210" font-size="9.5">REST catalog (JDBC: PostgreSQL)</text>
+    <text x="700" y="62" font-weight="700">Trino</text><text x="700" y="78">SQL analytics</text><text x="700" y="91" font-size="9.5">time travel</text>
+    <text x="700" y="182" font-weight="700">MinIO (S3)</text><text x="700" y="197">Parquet data,</text><text x="700" y="210" font-size="9.5">deletes, metadata</text>
+    <text x="320" y="181" font-weight="700">Airflow</text><text x="320" y="196">Spark maintenance</text><text x="320" y="210" font-size="9.5">compaction · expiry · purge</text>
+    <text x="305" y="261" font-weight="700">Prometheus + Grafana + exporter</text><text x="305" y="277" font-size="9.5">freshness · slot lag · ingest rate · file health · alerts</text>
+  </g>
+  <g stroke="#121417" stroke-width="1.1" fill="none" marker-end="url(#a)">
+    <path d="M67 160 V100"/><path d="M130 69 H158"/><path d="M275 69 H303"/><path d="M410 69 H438"/>
+    <path d="M522 108 V158"/><path d="M605 191 H643"/><path d="M700 98 V120 H615 V170 H607"/>
+    <path d="M395 191 H438"/>
+  </g>
+  <g fill="#6b7280" font-size="9"><text x="133" y="62">WAL</text><text x="277" y="62">events</text><text x="528" y="135">commit</text><text x="400" y="184">rewrite</text><text x="620" y="116">read</text></g>
+</svg>
+<div class="caption"><b>Figure 1</b> · Components and data flow. All services run as containers from one <code>docker-compose.yml</code>.</div>
+</figure>
+
+<p>Figure 1 shows the pipeline. Every component is open source and runs as a container; the same design maps onto
+managed cloud services (Section 7). Table 1 lists the components and the reasons for each choice.</p>
+<table>
+<thead><tr><th>Layer</th><th>Component</th><th>Design choice and reasoning</th></tr></thead>
+<tbody>
+<tr><td>Source</td><td>PostgreSQL 16</td><td><code>wal_level=logical</code>; publication <code>FOR TABLES IN SCHEMA shop</code> also covers tables created later.</td></tr>
+<tr><td>CDC</td><td>Debezium 2.7 (Kafka Connect)</td><td>Snapshot + streaming in one connector; decimals sent as exact strings with source precision/scale; secrets from environment variables.</td></tr>
+<tr><td>Transport</td><td>Kafka 3.9 (KRaft)</td><td>Durable, replayable log, one topic per table, ordered per key; zstd compression for the schema-carrying JSON events.</td></tr>
+<tr><td>Processing</td><td>Spark 3.5 Structured Streaming</td><td><code>foreachBatch</code> gives full SQL (MERGE) per micro-batch; checkpointed offsets.</td></tr>
+<tr><td>Table format</td><td>Iceberg 1.9, format v2</td><td>Engine-neutral; merge-on-read keeps streaming writes cheap; partition evolution without rewrites.</td></tr>
+<tr><td>Catalog</td><td>Iceberg REST catalog</td><td>Standard API used by both Spark and Trino; metadata pointers stored in PostgreSQL (concurrency-safe).</td></tr>
+<tr><td>Storage</td><td>MinIO</td><td>S3 API locally; swaps for Azure Data Lake Storage / Amazon S3 in the cloud.</td></tr>
+<tr><td>Query</td><td>Trino 476</td><td>Interactive SQL on Iceberg incl. metadata tables and time travel; also reads PostgreSQL for validation.</td></tr>
+<tr><td>Orchestration</td><td>Airflow 2.10</td><td>Scheduling, retries and run history for Spark maintenance jobs.</td></tr>
+<tr><td>Monitoring</td><td>Prometheus 3, Grafana 12</td><td>Custom exporter for lakehouse-specific signals plus Spark and MinIO metrics; alert rules.</td></tr>
+</tbody></table>
+<div class="tcap"><b>Table 1</b> · Components.</div>
+
+<h1><span class="num">04</span>Implementation</h1>
+<h2>4.1 Change capture</h2>
+<p>An initialisation script creates three database roles (application, Debezium with <code>REPLICATION</code>,
+catalog) and the TPC-H shaped schema <code>shop</code> (region, nation, customer, orders) plus a heartbeat table. The
+connector configuration is applied idempotently by a one-shot container (<code>PUT /connectors/postgres-cdc/config</code>)
+that waits until the task is <code>RUNNING</code>. Key settings: <code>plugin.name=pgoutput</code>,
+<code>decimal.handling.mode=string</code> together with <code>column.propagate.source.type</code> (so
+<code>numeric(12,2)</code> arrives exactly and with its precision), heartbeats every 10 s, and
+<code>max_slot_wal_keep_size=4GB</code> on PostgreSQL so a stopped consumer cannot fill the source disk.</p>
+
+<h2>4.2 Streaming ingestion into Iceberg</h2>
+<p>The Spark job subscribes to <code>pg\.shop\..*</code> (new tables are discovered automatically) and handles each
+micro-batch per table in five steps:</p>
+<ol>
+  <li><b>Schema discovery.</b> Each event embeds its schema. The job collects the distinct schemas present in the batch
+      (cutting the message text at the <code>"payload"</code> key, which is much cheaper than parsing every 3 KB
+      event) and merges them, newest first. Debezium logical types are mapped to Spark/Iceberg types (dates,
+      microsecond timestamps, zoned timestamps, decimals from source precision, binary).</li>
+  <li><b>Table creation / schema evolution.</b> Unknown tables are created (format v2, merge-on-read, zstd; primary key
+      recorded as a property). New source columns become <code>ALTER TABLE … ADD COLUMN</code>; type changes Iceberg
+      can promote in place (int→bigint, float→double, wider decimal) become <code>ALTER COLUMN … TYPE</code>; anything
+      else is cast to the existing type and logged.</li>
+  <li><b>Deduplication.</b> Only the latest event per primary key (highest Kafka offset) is kept.</li>
+  <li><b>MERGE.</b> One statement applies the batch:</li>
+</ol>
+<pre>MERGE INTO lakehouse.shop.orders t USING batch s ON t.o_orderkey = s.o_orderkey
+WHEN MATCHED AND s._cdc_op = 'd' THEN DELETE
+WHEN MATCHED THEN UPDATE SET …            -- all source columns + CDC metadata
+WHEN NOT MATCHED AND s._cdc_op &lt;&gt; 'd' THEN INSERT …</pre>
+<p>Because the MERGE is idempotent, replaying a micro-batch after a crash (Spark re-runs the last uncommitted batch)
+yields the same table state; with checkpointed offsets this gives effectively-once results. Commits that collide with a
+concurrent maintenance job are retried with exponential backoff. Each row carries <code>_cdc_op</code>,
+<code>_cdc_source_ts</code> (commit time in PostgreSQL), <code>_cdc_lsn</code> and <code>_ingested_at</code>, which
+enable freshness measurement and change audits. Finally, per-table batch statistics are appended to
+<code>lakehouse.ops.ingest_batches</code>.</p>
+
+<h2>4.3 Maintenance and optimisation</h2>
+<p>A single Spark job (<code>maintenance.py</code>) exposes the Iceberg procedures as composable steps, and three
+Airflow DAGs schedule them: hourly housekeeping, a manual <i>layout optimisation</i>, and a <i>GDPR purge</i>.
+The layout optimisation evolves <code>orders</code> to <code>PARTITIONED BY months(o_orderdate)</code> with sort order
+<code>(o_orderdate, o_custkey)</code> and sorts <code>customer</code> by <code>(c_nationkey, c_custkey)</code>, then
+runs <code>rewrite_data_files</code> (sort strategy, 128 MB target, all deletes applied, partial progress so commits stay
+small), <code>rewrite_position_delete_files</code>, <code>rewrite_manifests</code>, <code>expire_snapshots</code> and
+<code>remove_orphan_files</code>. Partition evolution changes only metadata: the streaming job keeps running and
+immediately writes new data in the new layout. Orphan removal is fed with an S3 listing through
+<code>file_list_view</code> and is restricted by Iceberg to files older than 24 h, so files of in-flight commits are
+never deleted.</p>
+
+<h2>4.4 Monitoring, testing and reproducibility</h2>
+<p>A custom Prometheus exporter writes a heartbeat row into PostgreSQL every 15 s and reports how old the newest
+heartbeat visible through Trino is — the true end-to-end freshness — together with replication-slot lag, connector
+state, ingest rate, MERGE duration and per-table data/delete files, bytes and snapshots. Prometheus also scrapes Spark's
+built-in streaming metrics and MinIO. Alert rules fire on stale data, a stopped connector, WAL growth, small-file
+accumulation and a stalled stream. Correctness is checked by comparing row counts and an order-independent
+<code>checksum()</code> over all columns between the <code>postgresql</code> and <code>lakehouse</code> catalogs in
+Trino. The repository contains unit tests (type mapping, evolution rules, configuration), a full-stack integration test
+(load → workload → update/delete → schema change → maintenance, each followed by a consistency check), a GitHub Actions
+workflow, and scripts for setup, the scripted demo and clean-up.</p>
+<figure>{{fig_grafana_dashboard}}<div class="caption"><b>Figure 2</b> · Grafana dashboard during the final run: initial-load backlog, then steady freshness under the live workload while data and delete files accumulate.</div></figure>
+
+<h1 class="pb"><span class="num">05</span>Evaluation and results</h1>
+<div class="panels">
+  <div class="panel"><div class="label" style="margin-bottom:5pt">Run information</div><div class="kv">
+    <span>Host</span><span>Apple silicon, 8 cores</span><span>Docker memory</span><span>8 GB</span>
+    <span>Spark</span><span>local mode, 10 s trigger</span><span>Batch limit</span><span>100 000 records</span>
+    <span>Dataset</span><span>TPC-H sf1 (Trino tpch)</span><span>Workload</span><span>100 ops/s, 5 min</span>
+    <span>Query timing</span><span>median of {{runs}} + warm-up</span></div></div>
+  <div class="panel"><div class="label" style="margin-bottom:5pt">Quality control · PostgreSQL vs Iceberg</div>
+    {{qc_panel}}</div>
+</div>
+<p>All services ran on one laptop with local-mode Spark, so the numbers describe a single node rather than a cluster.
+The data is TPC-H scale factor 1 (150 000 customers, 1 500 000 orders) plus a synthetic OLTP workload of 45 % new orders,
+20 % order updates, 10 % order deletes, 15 % balance updates and 5 % each new and deleted customers.</p>
+
+<div class="hero">
+  <div class="a"><div class="k">Query suite speed-up</div><div class="big">{{total_speedup}}×</div>
+    <div class="sub">Eight Trino queries, median of {{runs}} runs, before vs after the Airflow layout-optimisation DAG
+    (up to {{best_speedup}}× for a single query).</div></div>
+  <div class="b"><div class="k">Headline results</div><ul>
+    <li><b>{{load_rps}}</b>rows/s end-to-end ingestion, {{load_rows}} rows</li>
+    <li><b>{{fr_p50}} s</b>median CDC freshness (p95 {{fr_p95}} s)</li>
+    <li><b>−{{objects_saved_pct}} %</b>objects in storage ({{objects_before}} → {{objects_after}})</li>
+    <li><b>0</b>checksum differences, PostgreSQL vs Iceberg</li></ul></div>
+</div>
+
+<h2>5.1 Ingestion throughput</h2>
+<p>Loading {{load_rows}} TPC-H rows into PostgreSQL took {{load_pg_s}} s; all of them were queryable in Iceberg, with
+matching checksums, {{load_e2e_s}} s after the load started — <b>{{load_rps}} rows/s end-to-end</b> through Debezium,
+Kafka, Spark and the MERGE commit. Across all {{ing_batches}} micro-batches ({{ing_records}} change events) the
+streaming job processed {{ing_rps}} events/s while busy (peak batch {{ing_peak}} events/s); median batch duration was
+{{ing_p50}} s (p95 {{ing_p95}} s). The MERGE into orders itself took {{merge_p50}} s at the median ({{merge_p95}} s at p95), even
+for 90 000-row batches; most of the batch time is JSON decoding of the self-describing Debezium events on a single local-mode executor, which is the
+first thing a cluster deployment (more executors) or Avro + Schema Registry would improve.</p>
+<figure>{{fig_ingestion}}<div class="caption"><b>Figure 3</b> · Change events and processing time per micro-batch (initial load followed by the live workload).</div></figure>
+
+<h2>5.2 CDC end-to-end freshness</h2>
+<p>While the workload was running, probe rows were inserted into PostgreSQL every 2 s and polled through Trino.
+Of {{fr_n}} probes ({{fr_timeout}} timed out), the time from PostgreSQL commit to visibility in a Trino query was
+<b>{{fr_p50}} s median</b>, {{fr_p95}} s at p95 and {{fr_max}} s worst case (minimum {{fr_min}} s). The pipeline-internal
+part (commit → MERGE start) had a median of {{fr_pipe}} s. Freshness is bounded below by the 10 s trigger interval plus
+the MERGE and commit time; a shorter trigger lowers latency at the cost of more, smaller files — exactly the
+trade-off the maintenance jobs address.</p>
+<figure>{{fig_freshness}}<div class="caption"><b>Figure 4</b> · Distribution of end-to-end freshness.</div></figure>
+
+<h2>5.3 Small files, storage and query performance</h2>
+<p>Streaming writes leave the tables fragmented: after the load and workload the orders table consisted of
+{{orders_files_before}} data files averaging {{orders_avg_before}}, plus {{orders_del_before}} position-delete files that
+every query must merge at read time. The optimisation DAG rewrote them into {{orders_files_after}} sorted files
+(average {{orders_avg_after}}) in monthly partitions and expired the superseded snapshots.</p>
+{{files_table}}
+<div class="tcap"><b>Table 2</b> · Live files before → after optimisation.</div>
+<figure>{{fig_small_files}}<div class="caption"><b>Figure 5</b> · Live data files, delete files and average file size per table.</div></figure>
+{{storage_table}}
+<div class="tcap"><b>Table 3</b> · Object storage footprint in MinIO (all objects: data, deletes, manifests, metadata, old snapshots).</div>
+<p>The number of objects in the warehouse fell by {{objects_saved_pct}} % ({{objects_before}} → {{objects_after}}): {{delete_files_before}}
+live delete files, the superseded small data files, their manifests and the metadata of expired snapshots were removed.
+Total bytes changed by only {{bytes_change_pct}} % ({{bytes_before}} → {{bytes_after}}), because five minutes of
+workload produce small delete files and the expired snapshots referenced little data that was not still live; the
+monthly layout also stores 80 separately compressed files. Byte savings grow with longer retention of update-heavy
+history, whereas the object count — which drives listing, planning and request costs on cloud object storage — is
+what streaming ingestion inflates and what compaction controls.</p>
+
+<p>Table 4 compares the Trino query suite. Selective date queries benefit from partition pruning (whole months are
+skipped without reading files), and every query benefits from reading fewer files with no delete files to merge at read
+time. The point and customer lookups read <i>more</i> rows afterwards: streaming had written orders roughly in key order,
+which gave the original files narrow key ranges, while the new layout is sorted by date; they still became faster
+because far fewer files and no delete files are involved. Overall the suite ran
+<b>{{total_speedup}}× faster</b>; the largest gain was for <i>{{best_query}}</i> ({{best_speedup}}×).
+{{slower_note}}</p>
+{{query_table}}
+<div class="tcap"><b>Table 4</b> · Trino query latency (median of {{runs}} runs) and rows read.</div>
+<div class="label">Speed-up per query</div>
+{{speedup_bars}}
+
+<div class="note"><span class="label">Ablation · partition granularity</span>We also compared a single fully compacted
+orders file with the same data in monthly partitions ({{ab_files}} files of ~{{ab_avg}} KB each). Partitioning cut the
+rows read by the one-month query from {{ab_q02_rows_b}} to {{ab_q02_rows_a}} (latency {{ab_q02_pct}} %; quarter query
+{{ab_q07_pct}} %), but full-table queries became slower ({{ab_q05_pct}} % and {{ab_q06_pct}} %) because Trino has to open
+many small files. At TPC-H sf1 a month holds only ~20 000 orders; partitions should be sized to tens or hundreds of MB,
+so monthly partitioning pays off as volume grows, while at small scale a coarser transform (e.g. <code>years</code>) or
+sort order alone is preferable. Iceberg's partition evolution makes this a metadata-only decision that can be revisited.</div>
+
+<h2>5.4 Compaction overhead</h2>
+<p>The complete optimisation DAG took <b>{{opt_wall}} s</b> of wall time, running as Spark local-mode jobs inside the
+Airflow container while the streaming job continued. Its cost is paid once per layout change; routine hourly
+compaction only touches new small files.</p>
+{{opt_tasks}}
+
+<h2>5.5 Fault tolerance (observed)</h2>
+<p>During the first freshness measurement the Docker VM ran out of memory and the operating system killed the Spark
+driver. The container restarted automatically, resumed from the checkpointed Kafka offsets and re-applied the
+interrupted micro-batch; because the MERGE is idempotent, no change was lost or duplicated and the subsequent
+consistency checks passed. The incident is visible in that measurement: median freshness stayed at {{inc_p50}} s, but
+the probes caught in the restart took up to {{inc_max}} s ({{inc_n}} visible, {{inc_timeout}} timed out). Memory
+limits were then reduced so that the steady-state total leaves headroom in the 8 GB VM, and freshness was re-measured
+(Section 5.2).</p>
+
+<h2>5.6 Correctness</h2>
+<p>Row counts and full-row checksums of every table were identical between PostgreSQL and Iceberg before and after the
+optimisation (Table 5); this check also ran after the initial load, after the workload, after a full replay of the Kafka
+topics into an empty lake, and in the integration test.</p>
+{{consistency_rows}}
+<div class="tcap"><b>Table 5</b> · PostgreSQL vs Iceberg (Trino <code>checksum()</code> over all source columns).</div>
+
+<h2>5.7 Functional demonstrations</h2>
+<ul>
+  <li><b>Schema evolution:</b> <code>ALTER TABLE … ADD COLUMN</code> and an integer→bigint change in PostgreSQL reached
+      Iceberg within about 10 s as metadata-only changes; old rows read <code>NULL</code> for the new column.</li>
+  <li><b>Time travel:</b> the same order queried as of the current snapshot, a snapshot id and a timestamp returned the
+      new and the old values; the CDC columns allow auditing which rows changed since a snapshot.</li>
+  <li><b>GDPR erasure:</b> a customer deleted in PostgreSQL disappeared from current queries within about 10 s (as
+      position deletes) but was still readable through time travel; the purge DAG rewrote the affected files and expired
+      history, after which the old snapshot no longer existed.</li>
+</ul>
+
+<h1><span class="num">06</span>Technical challenges and lessons learned</h1>
+<table>
+<thead><tr><th>Problem observed</th><th>Root cause</th><th>Resolution</th></tr></thead>
+<tbody>
+<tr><td>MERGE commits failed with HTTP 500 under concurrent writes</td><td>REST catalog's SQLite store returned <code>SQLITE_BUSY</code></td><td>Catalog metadata moved to a PostgreSQL JDBC store; lake rebuilt by replaying Kafka</td></tr>
+<tr><td>MERGE failed: “Cannot add fieldId … as an identifier field”</td><td>Iceberg 1.9 issue with identifier fields in Spark MERGE</td><td>Primary key kept as a table property</td></tr>
+<tr><td><code>remove_orphan_files</code>: no FileSystem for scheme “s3”</td><td>Procedure lists storage via Hadoop; stack uses S3FileIO</td><td>S3 listing supplied via <code>file_list_view</code>; 24 h safety window kept</td></tr>
+<tr><td>Join queries hit Trino's 432 MB per-node limit; later Trino ran at its container limit</td><td>Default sizing: heap = 80 % of the container, query memory = 30 % of heap</td><td>Explicit 1 GB heap, 600 MB query memory, spill-to-disk</td></tr>
+<tr><td>Sorted rewrite of 1.5 M rows ran out of heap, then was SIGKILLed</td><td>1 GB driver too small; then uncapped off-heap memory exceeded the container</td><td>1.2 GB heap with capped direct/metaspace memory; container limit sized for Airflow + job</td></tr>
+<tr><td>High JSON parsing cost per event</td><td>Debezium JSON carries its schema (~3 KB)</td><td>zstd in Kafka; schema read from a string prefix instead of full parsing</td></tr>
+<tr><td>Kafka Connect ran out of heap during the 1.5 M-row load</td><td>Debezium queue bounded by record count only</td><td>Queue bounded by bytes (128 MB); heap raised to 896 MB</td></tr>
+<tr><td>Spark driver killed by the VM out-of-memory killer</td><td>Sum of container memory use exceeded the 8 GB VM</td><td>Driver and Trino memory trimmed; restart recovered with no data loss</td></tr>
+<tr><td>Fitting 13 services into 8 GB</td><td>Laptop deployment</td><td>Per-container memory limits, local-mode Spark, shared base image</td></tr>
+</tbody></table>
+<p>The main lesson is that the hard parts of CDC ingestion are operational: concurrency between writers, metadata growth,
+small files and observability matter as much as the happy-path data flow, and each is easier to get right with an
+explicit correctness check that can be re-run at any time.</p>
+
+<h1><span class="num">07</span>Conclusion and future work</h1>
+<p>The project delivers a working, reproducible CDC lakehouse: changes made in PostgreSQL become queryable in Iceberg
+within seconds, the copy is provably identical to the source, schemas evolve without intervention, history is queryable
+and can be erased on request, and scheduled optimisation turns the streaming-induced small files into a layout that
+makes analytical queries {{total_speedup}}× faster while cutting the number of stored objects by {{objects_saved_pct}} %. Limitations are the
+single-node deployment, a 10 s minimum freshness from the micro-batch trigger, and that dropped source columns remain
+in Iceberg. Natural extensions are a comparison with Apache Hudi on the same workload, column-level lineage with
+Apache Atlas or OpenLineage, Avro with a schema registry to cut serialisation cost, deployment on Kubernetes (AKS)
+with Azure Data Lake Storage and Event Hubs, and Flink for lower-latency ingestion.</p>
+
+<h1>References</h1>
+<ol class="small">
+  <li>Apache Iceberg. <i>Table Spec, Spark procedures and maintenance documentation</i>. https://iceberg.apache.org/docs/latest/</li>
+  <li>Debezium. <i>Debezium connector for PostgreSQL</i>, version 2.7. https://debezium.io/documentation/</li>
+  <li>Apache Spark. <i>Structured Streaming Programming Guide</i>, version 3.5. https://spark.apache.org/docs/3.5.6/</li>
+  <li>Trino. <i>Iceberg connector</i>. https://trino.io/docs/current/connector/iceberg.html</li>
+  <li>Apache Kafka. <i>Documentation</i>, version 3.9. https://kafka.apache.org/documentation/</li>
+  <li>PostgreSQL Global Development Group. <i>Logical Replication</i>, PostgreSQL 16 documentation.</li>
+  <li>Apache Airflow. <i>Documentation</i>, version 2.10. https://airflow.apache.org/docs/</li>
+  <li>M. Armbrust, A. Ghodsi, R. Xin, M. Zaharia. <i>Lakehouse: A New Generation of Open Platforms that Unify Data
+      Warehousing and Advanced Analytics</i>. CIDR 2021.</li>
+  <li>Transaction Processing Performance Council. <i>TPC Benchmark H Standard Specification</i>.</li>
+</ol>
+
+<h1 class="pb">Appendix A — Reproducing the results</h1>
+<pre>git clone &lt;repository&gt; floe &amp;&amp; cd floe
+./scripts/setup.sh                 # prerequisites, .env, verified jar downloads, images
+./scripts/run_demo.sh --full       # stack, TPC-H sf1, workload, validation, demos, benchmark
+# or step by step
+make up            # start all services
+make load          # TPC-H sf1 -&gt; PostgreSQL; prints end-to-end ingestion throughput
+make bench         # freshness probes under load, then before/after optimisation benchmark
+make validate      # PostgreSQL vs Iceberg row counts + checksums
+python3 docs/report/build_report.py   # regenerate this report from results/</pre>
+
+<h1>Appendix B — Key configuration</h1>
+<pre>-- Debezium connector (config/debezium/postgres-cdc.json, excerpt)
+plugin.name=pgoutput   publication.name=dbz_publication   slot.name=debezium_shop
+topic.prefix=pg        schema.include.list=shop           snapshot.mode=initial
+decimal.handling.mode=string   column.propagate.source.type=shop\..*   heartbeat.interval.ms=10000
+
+-- Iceberg table properties set by the streaming job
+format-version=2   write.{delete,update,merge}.mode=merge-on-read   write.parquet.compression-codec=zstd
+
+-- Spark catalog (config/spark/spark-defaults.conf)
+spark.sql.catalog.lakehouse=org.apache.iceberg.spark.SparkCatalog   type=rest   uri=http://iceberg-rest:8181
+io-impl=org.apache.iceberg.aws.s3.S3FileIO   s3.endpoint=http://minio:9000   s3.path-style-access=true
+
+-- Layout optimisation (src/topologies/spark/maintenance.py)
+ALTER TABLE lakehouse.shop.orders ADD PARTITION FIELD months(o_orderdate);
+ALTER TABLE lakehouse.shop.orders WRITE ORDERED BY o_orderdate, o_custkey;
+CALL lakehouse.system.rewrite_data_files(table =&gt; 'shop.orders', strategy =&gt; 'sort',
+     options =&gt; map('rewrite-all','true','delete-file-threshold','2','target-file-size-bytes','134217728',
+                    'partial-progress.enabled','true'));</pre>
+</body>
+</html>

@@ -1,0 +1,8 @@
+config/docker/jars/
+config/docker/catalog-jars/
+results/maintenance/
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+docs/report/report.html
