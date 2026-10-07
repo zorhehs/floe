@@ -11,4 +11,4 @@ testpaths = ["tests/unit"]
 
 [tool.ruff.lint.per-file-ignores]
 # runs on the host's system Python (3.9 on macOS), where zip(strict=...) does not exist
-"docs/report/build_report.py" = ["B905"]
+"docs/report/latex/build_tex.py" = ["B905"]

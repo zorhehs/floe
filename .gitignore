@@ -5,4 +5,5 @@ results/maintenance/
 __pycache__/
 *.pyc
 .pytest_cache/
-docs/report/report.html
+docs/report/latex/main.pdf
+docs/report/latex/_arch.html

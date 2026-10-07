@@ -37,7 +37,7 @@ flowchart LR
 Prerequisites:
 * Docker with **8 GB or more** of memory (10–12 GB recommended)
 * about 10 GB of free disk
-* Python 3.9+ on the host only to rebuild the report PDF (everything else runs in containers)
+* Python 3.9+ and Chrome on the host only to regenerate the report sources (everything else runs in containers)
 * `make` and `bash`
 
 ```bash
@@ -84,7 +84,7 @@ Step-by-step instructions, configuration and troubleshooting are in **[docs/depl
 | 5 | Trino SQL query suite | `src/consumers/queries/` |
 | 6 | Before/after performance report | `results/benchmark-*/summary.md` (`make bench`) |
 | 7 | Demo video (5–8 min) | script in `docs/DEMO_SCRIPT.md` (link added after recording) |
-| 8 | Technical report (9 pages, PDF) | [`docs/report/report.pdf`](docs/report/report.pdf), regenerated from results by `docs/report/build_report.py` |
+| 8 | Technical report (IEEE format, PDF) | [`docs/report/report.pdf`](docs/report/report.pdf); LaTeX source in `docs/report/latex/` (Overleaf-ready zip included), regenerated from results by `docs/report/latex/build_tex.py` |
 | + | Extra credit: GDPR row-level deletes and merge-on-read | `scripts/demos/gdpr_delete.sh`, DAG `iceberg_gdpr_purge` |
 | + | Monitoring | `config/monitoring/` (Prometheus, alert rules, Grafana dashboard), `src/consumers/exporter.py` |
 | + | CI | `.github/workflows/build.yml`: lint, unit tests, image build, full-stack integration test |
