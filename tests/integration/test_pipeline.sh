@@ -28,6 +28,27 @@ $DC exec -T postgres psql -U app -d oltp -c "UPDATE shop.customer SET c_name='IT
 wait_for "SELECT c_name FROM lakehouse.shop.customer WHERE c_custkey=1" "IT-UPDATED" || fail "update not propagated"
 $TOOLS consumers.validate --wait 300 || fail "delete not propagated"
 
+echo "== console (web interface)"
+CONSOLE=http://localhost:8090
+json() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
+for _ in $(seq 1 30); do curl -fsS "$CONSOLE/api/ping" >/dev/null 2>&1 && break; sleep 2; done
+curl -fsS "$CONSOLE/" | grep -q "<title>Floe Console</title>" || fail "console page not served"
+for _ in $(seq 1 30); do
+  health=$(curl -fsS "$CONSOLE/api/status" | json 'f"{d[\"healthy\"]}/{d[\"total\"]}"')
+  [[ "${health%/*}" == "${health#*/}" ]] && break; sleep 5
+done
+[[ "${health%/*}" == "${health#*/}" ]] || fail "console reports $health components healthy"
+curl -fsS -X POST "$CONSOLE/api/sql" -d '{"sql":"SELECT count(*) FROM lakehouse.shop.region"}' | grep -q '"rows": \[\[5\]\]' \
+  || fail "console SQL workbench"
+denied=$(curl -sS -X POST "$CONSOLE/api/sql" -d '{"sql":"EXPLAIN ANALYZE INSERT INTO lakehouse.shop.region SELECT * FROM lakehouse.shop.region"}')
+grep -q "Access Denied" <<<"$denied" || fail "workbench user is not read-only: $denied"
+job=$(curl -fsS -X POST "$CONSOLE/api/trace" -d '{"action":"update_customer","key":3,"balance":"1234.56"}' | json 'd["id"]')
+for _ in $(seq 1 90); do
+  state=$(curl -fsS "$CONSOLE/api/jobs/$job" | json 'd["state"]'); [[ "$state" != running ]] && break; sleep 2
+done
+[[ "$state" == done ]] || fail "console live CDC trace: $(curl -fsS "$CONSOLE/api/jobs/$job")"
+wait_for "SELECT CAST(c_acctbal AS varchar) FROM lakehouse.shop.customer WHERE c_custkey=3" "1234.56" || fail "trace change not in lake"
+
 echo "== schema evolution"
 $DC exec -T postgres psql -U app -d oltp -c "ALTER TABLE shop.customer ADD COLUMN IF NOT EXISTS it_col integer; UPDATE shop.customer SET it_col = 7 WHERE c_custkey = 2;"
 wait_for "SELECT it_col FROM lakehouse.shop.customer WHERE c_custkey=2" "7" || fail "new column not propagated"

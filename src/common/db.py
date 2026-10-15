@@ -30,11 +30,11 @@ def pg_connect(autocommit: bool = True) -> psycopg.Connection:
     )
 
 
-def trino_connect() -> trino.dbapi.Connection:
+def trino_connect(user: str = "lakehouse") -> trino.dbapi.Connection:
     return trino.dbapi.connect(
         host=os.getenv("TRINO_HOST", "trino"),
         port=int(os.getenv("TRINO_PORT", "8080")),
-        user="lakehouse",
+        user=user,
         catalog="lakehouse",
         schema="shop",
         request_timeout=600,
@@ -44,8 +44,8 @@ def trino_connect() -> trino.dbapi.Connection:
 class Trino:
     """Thin wrapper returning rows and Trino query statistics."""
 
-    def __init__(self):
-        self.conn = trino_connect()
+    def __init__(self, user: str = "lakehouse"):
+        self.conn = trino_connect(user)
 
     def query(self, sql: str, params=None):
         cur = self.conn.cursor()

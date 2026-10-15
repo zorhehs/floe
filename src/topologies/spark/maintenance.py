@@ -51,6 +51,12 @@ LAYOUT_PLAN = {
     },
 }
 
+# Tables written by the pipeline itself (heartbeat, per-batch metrics). They commit every
+# few seconds, nobody time-travels in them, so their history is kept short: otherwise
+# thousands of snapshots and tiny files a day slow down every MERGE and freshness probe.
+OPERATIONAL_TABLES = {"shop.cdc_probe", "ops.ingest_batches"}
+OPERATIONAL_HISTORY_MINUTES = 60
+
 log = logging.getLogger("maintenance")
 
 
@@ -193,6 +199,8 @@ def run(spark: SparkSession, args) -> dict:
         tables = ([f"{DEFAULT_NAMESPACE}.{r.tableName}"
                    for r in spark.sql(f"SHOW TABLES IN {CATALOG}.{DEFAULT_NAMESPACE}").collect()]
                   if DEFAULT_NAMESPACE in namespaces else [])
+        if "ops" in namespaces:  # the streaming job's batch metrics need housekeeping too
+            tables += [f"ops.{r.tableName}" for r in spark.sql(f"SHOW TABLES IN {CATALOG}.ops").collect()]
     report = {"started_at": datetime.now(timezone.utc).isoformat(), "tables": {}}
 
     for table in tables:
@@ -223,7 +231,10 @@ def run(spark: SparkSession, args) -> dict:
         if args.purge:
             timed("purge_expire", step_expire, older_than_minutes=0, retain_last=1)
         elif args.expire:
-            timed("expire", step_expire, args.expire_older_than_minutes, args.retain_last)
+            minutes = args.expire_older_than_minutes
+            if table in OPERATIONAL_TABLES:
+                minutes = min(minutes, OPERATIONAL_HISTORY_MINUTES)
+            timed("expire", step_expire, minutes, args.retain_last)
         if args.orphans:
             timed("orphans", step_orphans, args.orphan_older_than_minutes)
 
@@ -238,7 +249,7 @@ def run(spark: SparkSession, args) -> dict:
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--tables", type=lambda s: [t.strip() for t in s.split(",") if t.strip()],
-                   help="comma separated <namespace>.<table>; default: all tables in 'shop'")
+                   help="comma separated <namespace>.<table>; default: all tables in 'shop' and 'ops'")
     p.add_argument("--layout", action="store_true")
     p.add_argument("--compact", action="store_true")
     p.add_argument("--rewrite-deletes", action="store_true")

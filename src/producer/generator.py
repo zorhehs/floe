@@ -102,6 +102,20 @@ class Workload:
             cur.execute("DELETE FROM shop.customer WHERE c_custkey = %s", [key])
 
 
+def run_transaction(conn, wl: Workload, n: int, done: dict) -> None:
+    """Run n randomly chosen operations (weighted by MIX) as one transaction."""
+    ops, weights = zip(*MIX, strict=True)
+    try:
+        with conn.cursor() as cur:
+            for op in random.choices(ops, weights, k=n):
+                getattr(wl, op)(cur)
+                done[op] = done.get(op, 0) + 1
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--ops-per-sec", type=float, default=float(os.getenv("WORKLOAD_OPS_PER_SEC", "100")))
@@ -122,7 +136,7 @@ def main():
             print(f"waiting for PostgreSQL: {exc}", flush=True)
             time.sleep(5)
 
-    ops, weights = zip(*MIX, strict=True)
+    ops = [op for op, _ in MIX]
     tick = 0.1
     per_tick = args.ops_per_sec * tick
     carry = 0.0
@@ -136,13 +150,8 @@ def main():
         n, carry = int(carry), carry - int(carry)
         if n:
             try:
-                with conn.cursor() as cur:  # one transaction per tick
-                    for op in random.choices(ops, weights, k=n):
-                        getattr(wl, op)(cur)
-                        done[op] += 1
-                conn.commit()
+                run_transaction(conn, wl, n, done)
             except Exception as exc:  # noqa: BLE001 - keep the workload alive
-                conn.rollback()
                 print(f"transaction rolled back: {exc}", flush=True)
         if time.time() - last_report >= 10:
             elapsed = time.time() - started

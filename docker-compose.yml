@@ -221,6 +221,8 @@ services:
       - ./config/trino/catalog:/etc/trino/catalog:ro
       - ./config/trino/config.properties:/etc/trino/config.properties:ro
       - ./config/trino/jvm.config:/etc/trino/jvm.config:ro
+      - ./config/trino/access-control.properties:/etc/trino/access-control.properties:ro
+      - ./config/trino/rules.json:/etc/trino/rules.json:ro
       - ./src/consumers/queries:/opt/queries:ro
     mem_limit: 1536m
     restart: unless-stopped
@@ -287,6 +289,33 @@ services:
       WORKLOAD_OPS_PER_SEC: ${WORKLOAD_OPS_PER_SEC}
     volumes:
       - ./src:/opt/src:ro
+    mem_limit: 256m
+    restart: unless-stopped
+
+  # ------------------------------------------------------------- web console
+  console:
+    image: floe/tools:latest
+    command: ["python3", "-m", "console.app", "--port", "8090"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      trino: {condition: service_started}
+    environment:
+      <<: *tools-env
+      CONNECT_URL: http://connect:8083
+      PROMETHEUS_URL: http://prometheus:9090
+      SPARK_UI_URL: http://spark-streaming:4040
+      ICEBERG_REST_URL: http://iceberg-rest:8181
+      GRAFANA_URL: http://grafana:3000
+    # Local only: the console can write to the source database.
+    ports: ["127.0.0.1:8090:8090"]
+    volumes:
+      - ./src:/opt/src:ro
+      - ./src/consumers/queries:/opt/queries:ro
+      - ./results:/opt/results:ro
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8090/api/ping', timeout=3)"]
+      interval: 15s
+      retries: 5
     mem_limit: 256m
     restart: unless-stopped
 

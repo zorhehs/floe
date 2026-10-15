@@ -15,6 +15,19 @@
 | Query | Trino 476 | SQL over Iceberg (and PostgreSQL for validation) | `trino` |
 | Orchestration | Airflow 2.10 | Scheduled and manual Spark maintenance DAGs | `airflow` |
 | Monitoring | Prometheus 3, Grafana 12, custom exporter | Freshness, lag, throughput, file health, alerts | `exporter`, `prometheus`, `grafana` |
+| Interface | Floe Console (Python standard-library server + single-page app) | Operate and demonstrate the pipeline: health, live CDC trace, schema evolution, time travel, read-only SQL, Airflow DAGs, validation | `console` |
+
+### Floe Console
+
+The console (`src/console/app.py`, port 8090, bound to localhost) talks to the components through their own interfaces. It never bypasses the pipeline:
+
+* **PostgreSQL** (psycopg): writes for the live trace, the workload and schema changes, so every change still travels through Debezium and Spark.
+* **Trino**: every lakehouse read, including `$snapshots`, `$files`, `FOR VERSION AS OF` and the `postgresql` catalog for validation. The SQL workbench connects as Trino user `workbench`. Trino's file-based access control (`config/trino/rules.json`) makes that user read-only on every catalog, so even `EXPLAIN ANALYZE INSERT …` is denied by the engine, not only by the console's keyword check.
+* **Airflow REST API**: trigger and follow the maintenance DAGs.
+* **Kafka Connect, Spark UI, Iceberg REST, MinIO, Grafana**: health checks.
+* **Prometheus**: freshness and ingest series.
+
+Long operations (a trace, a schema change, validation, a data load) run as background jobs that the browser polls through `/api/jobs/<id>`. Snapshot ids are 64-bit and are sent as strings so JavaScript does not round them.
 
 ## Data flow of one change
 

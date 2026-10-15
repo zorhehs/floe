@@ -4,7 +4,7 @@ DC    := docker compose
 TOOLS := $(DC) --profile tools run --rm tools python3 -m
 
 .DEFAULT_GOAL := help
-.PHONY: help jars pull build up down clean status load workload-start workload-stop validate \
+.PHONY: help jars pull build up down clean status load workload-start workload-stop validate console \
         freshness optimize bench report demo-schema demo-timetravel demo-gdpr trino psql \
         logs maintenance-now test
 
@@ -23,7 +23,7 @@ build: jars ## Build the Spark / tools / Airflow images
 up: jars ## Start the whole stack (Postgres, Kafka, Debezium, MinIO, Iceberg REST, Spark, Trino, Airflow)
 	$(DC) --profile tools build
 	$(DC) up -d
-	@echo "Grafana http://localhost:3000 | Trino http://localhost:8080 | Airflow http://localhost:8088 | MinIO http://localhost:9001 | Spark UI http://localhost:4040"
+	@echo "Console http://localhost:8090 | Grafana http://localhost:3000 | Trino http://localhost:8080 | Airflow http://localhost:8088 | MinIO http://localhost:9001 | Spark UI http://localhost:4040"
 
 down: ## Stop the stack (keeps data)
 	$(DC) --profile tools --profile workload down
@@ -74,6 +74,10 @@ demo-timetravel: ## Demo: Iceberg snapshots and time travel
 
 demo-gdpr: ## Demo: GDPR erasure (row-level delete, merge-on-read, physical purge)
 	./scripts/demos/gdpr_delete.sh
+
+console: ## Open the Floe Console (web interface) in the browser
+	@url=http://localhost:8090; echo "Floe Console: $$url"; \
+	  (command -v open >/dev/null && open "$$url") || (command -v xdg-open >/dev/null && xdg-open "$$url") || true
 
 trino: ## Interactive Trino CLI
 	$(DC) exec trino trino --catalog lakehouse --schema shop

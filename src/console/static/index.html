@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Floe Console</title>
+  <meta name="description" content="Operate and inspect the Floe CDC lakehouse: PostgreSQL → Debezium → Kafka → Spark → Iceberg → Trino.">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/fonts.css?v=5">
+  <link rel="stylesheet" href="/app.css?v=5">
+</head>
+<body>
+  <header class="header">
+    <a class="brand" href="#/overview" aria-label="Floe console home">
+      <svg width="46" height="32" viewBox="0 0 46 32" aria-hidden="true">
+        <rect width="46" height="32" rx="16" fill="#76fb91"/>
+        <path d="M13 21.5 18.5 9l9 2.2 5.5 6.8-4.2 4.5H16Z" fill="#000"/>
+      </svg>
+      <span class="brand-name">floe</span>
+    </a>
+    <nav class="nav" aria-label="Sections">
+      <a href="#/overview">Overview</a>
+      <a href="#/live">Live CDC</a>
+      <a href="#/tables">Tables &amp; schema</a>
+      <a href="#/time-travel">Time travel</a>
+      <a href="#/sql">SQL workbench</a>
+      <a href="#/maintenance">Maintenance</a>
+      <a href="#/validate">Validation</a>
+      <a href="#/results">Benchmark</a>
+    </nav>
+  </header>
+
+  <section class="hero">
+    <div>
+      <div class="eyebrow" id="page-eyebrow"></div>
+      <h1 id="page-title">Overview</h1>
+      <p id="page-sub"></p>
+    </div>
+    <div class="spacer"></div>
+    <aside class="hero-card" id="hero-card" hidden aria-live="polite"></aside>
+    <div class="pills">
+      <button class="pill" id="workload-pill" type="button" title="Synthetic OLTP workload - open its controls"></button>
+      <a class="pill" id="health-pill" href="#/overview" title="Component health"></a>
+    </div>
+  </section>
+
+  <main class="view" id="view" tabindex="-1"></main>
+
+  <footer class="footer">
+    <span>Component UIs</span>
+    <nav aria-label="Component UIs">
+      <a href="http://localhost:3000" target="_blank" rel="noopener">Grafana <span>:3000</span></a>
+      <a href="http://localhost:8088" target="_blank" rel="noopener">Airflow <span>:8088</span></a>
+      <a href="http://localhost:8080" target="_blank" rel="noopener">Trino <span>:8080</span></a>
+      <a href="http://localhost:4040" target="_blank" rel="noopener">Spark <span>:4040</span></a>
+      <a href="http://localhost:9001" target="_blank" rel="noopener">MinIO <span>:9001</span></a>
+      <a href="http://localhost:9090" target="_blank" rel="noopener">Prometheus <span>:9090</span></a>
+    </nav>
+    <span class="credit">SE-315 Cloud Computing · Group 04 · Aliyan Zulfiqar, Sehrosh Riaz</span>
+  </footer>
+
+  <div class="toast-host" id="toasts" role="status" aria-live="polite"></div>
+  <script src="/app.js?v=5"></script>
+</body>
+</html>

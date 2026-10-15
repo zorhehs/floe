@@ -7,8 +7,9 @@ the streaming job writes to. Commit conflicts with the streaming job are
 resolved by Iceberg optimistic concurrency + task retries.
 
 DAGs
-  iceberg_maintenance         hourly housekeeping (paused at creation; unpause
-                              in the UI to run it continuously)
+  iceberg_maintenance         hourly housekeeping (active from the start: the
+                              pipeline's heartbeat and metrics tables commit every
+                              few seconds and need it; the benchmark pauses it)
   iceberg_layout_optimization manual: partition evolution + sorted compaction
                               + cleanup (used by the benchmark)
   iceberg_gdpr_purge          manual: physically erase deleted rows from a table
@@ -62,7 +63,7 @@ with DAG(
     start_date=datetime(2026, 1, 1),
     catchup=False,
     max_active_runs=1,
-    is_paused_upon_creation=True,
+    is_paused_upon_creation=False,
     default_args=default_args,
     params={
         "tables": Param("", type="string", description="comma separated, empty = all"),

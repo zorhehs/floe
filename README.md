@@ -15,7 +15,8 @@ The pipeline works as follows:
 4. **Trino** runs the queries.
 5. **Airflow** runs the compaction and partition-optimisation jobs.
 6. **Prometheus/Grafana** monitor the whole pipeline.
-7. A benchmark compares query performance and storage footprint before and after optimisation.
+7. The **Floe Console** (http://localhost:8090) is the web interface for running and demonstrating all of it.
+8. A benchmark compares query performance and storage footprint before and after optimisation.
 
 ```mermaid
 flowchart LR
@@ -30,7 +31,11 @@ flowchart LR
   AF[Airflow] -- spark-submit --> MJ[Compaction · partition evolution<br/>expire · orphans · GDPR purge]
   MJ --> ICE
   EXP[Exporter] --> PROM[Prometheus] --> GRA[Grafana]
+  UI[Floe Console] -.-> PG & T & AF & PROM
 ```
+
+<!-- Screenshot of the console Overview page: capture it as docs/console.png once the stack is up, then
+     replace this comment with  ![Floe Console, overview page](docs/console.png)  -->
 
 ## Quick start
 
@@ -51,6 +56,7 @@ Step-by-step instructions, configuration and troubleshooting are in **[docs/depl
 
 | Service | URL | Login |
 |---|---|---|
+| **Floe Console** (web interface) | http://localhost:8090 | – (bound to localhost only) |
 | Grafana (pipeline dashboard) | http://localhost:3000 | anonymous view, or admin / admin |
 | Trino | http://localhost:8080 | any user name |
 | Airflow | http://localhost:8088 | admin / admin |
@@ -58,6 +64,23 @@ Step-by-step instructions, configuration and troubleshooting are in **[docs/depl
 | Spark UI | http://localhost:4040 | – |
 | Prometheus | http://localhost:9090 | – |
 | PostgreSQL | localhost:5433 / `oltp` | app / app |
+
+## Floe Console
+
+Once the stack is up, open **http://localhost:8090** (`make console`). One interface runs and shows the whole pipeline without a terminal:
+
+| Page | What you can do |
+|---|---|
+| **Overview** | Health of all 10 components, live freshness, ingest rate, replication lag and micro-batches. Start or stop the OLTP workload, or load TPC-H into an empty database. |
+| **Live CDC** | Update a customer, insert or delete an order in PostgreSQL and follow it until Trino sees it in Iceberg: commit → WAL position → micro-batch → visible, with the measured latency and both rows side by side. |
+| **Tables & schema** | Row counts in PostgreSQL vs Iceberg, data and delete files, snapshots. Add a column or widen `integer` → `bigint` in PostgreSQL and watch Iceberg evolve its schema. |
+| **Time travel** | Every snapshot of a table, a snapshot compared with now, and the history of one row across the last 12 snapshots. |
+| **SQL workbench** | Run the 8 benchmark queries or any read-only query on Trino, see time and rows scanned, export CSV. Runs as Trino user `workbench`, which `config/trino/rules.json` makes read-only on every catalog. |
+| **Maintenance** | Trigger the Airflow compaction, layout and GDPR purge DAGs, follow their tasks, and see the file layout they leave behind. |
+| **Validation** | PostgreSQL vs Iceberg row counts and checksums for every table. |
+| **Benchmark** | The recorded before/after results of `make bench`. |
+
+The console (`src/console/`) is a small Python server using only the standard library and the clients already in the tools image, plus a dependency-free single-page app. Long operations run as background jobs that the page polls. It listens on localhost only, because it can write to the source database.
 
 ## Make targets
 
@@ -70,6 +93,7 @@ Step-by-step instructions, configuration and troubleshooting are in **[docs/depl
 | `make validate` | PostgreSQL vs Iceberg row counts and checksums |
 | `make demo-schema` / `make demo-timetravel` / `make demo-gdpr` | Scripted demonstrations |
 | `make bench` | Freshness test, then a before/after optimisation benchmark → `results/` |
+| `make console` | Open the Floe Console in the browser |
 | `make trino` / `make psql` / `make logs` | CLIs and logs |
 | `make test` | Unit tests (needs `pip install pyspark==3.5.6 pytest`) |
 
@@ -88,6 +112,8 @@ Step-by-step instructions, configuration and troubleshooting are in **[docs/depl
 | + | Extra credit: GDPR row-level deletes and merge-on-read | `scripts/demos/gdpr_delete.sh`, DAG `iceberg_gdpr_purge` |
 | + | Monitoring | `config/monitoring/` (Prometheus, alert rules, Grafana dashboard), `src/consumers/exporter.py` |
 | + | CI | `.github/workflows/build.yml`: lint, unit tests, image build, full-stack integration test |
+| + | Web interface | Floe Console, `src/console/` (http://localhost:8090) |
+| + | Presentation slides | `docs/slides/cc-streaming-group04.pptx` (PDF export alongside); brief in `docs/slides/SLIDES_BRIEF.md` |
 
 ## How it works (short)
 
@@ -115,6 +141,7 @@ Step-by-step instructions, configuration and troubleshooting are in **[docs/depl
    * per-table data and delete files, snapshots and bytes
 
    Prometheus alert rules cover freshness, a stopped connector, WAL growth, small-file build-up and a stalled stream.
+6. **Housekeeping.** The hourly `iceberg_maintenance` DAG is active from the start. The heartbeat table and the streaming job's metrics table commit every few seconds, so the job keeps only one hour of their history; business tables keep 24 hours for time travel.
 
 ## Evaluation metrics
 
@@ -150,6 +177,7 @@ floe/
 │   ├── producer/        # TPC-H loader, OLTP workload generator
 │   ├── topologies/      # spark/ (CDC streaming job, maintenance job), airflow/ (DAGs)
 │   ├── consumers/       # Trino query suite, benchmark, validation, Prometheus exporter
+│   ├── console/         # Floe Console: web interface (Python server + static single-page app)
 │   └── common/          # shared connections (PostgreSQL, Trino, Airflow API)
 ├── config/
 │   ├── docker/          # Dockerfile (spark | tools | airflow targets), jars (downloaded)
