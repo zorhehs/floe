@@ -47,7 +47,7 @@ The same steps with `make`:
 | Validation says `NOT CONSISTENT` while the generator runs | Expected: the lake trails the source by a few seconds. Stop the generator and validate again. |
 | Image pulls fail on a slow network | `make pull` retries every image until it succeeds. `make jars` resumes partial downloads. |
 | A component is red in the Floe Console | The card shows the error. Run `docker compose logs <service>`; most recover on their own, as every service has `restart: unless-stopped`. |
-| Heartbeat MERGEs and freshness get slower after hours of running | The hourly `iceberg_maintenance` DAG keeps the heartbeat and metrics tables small. It is active by default; if it was paused, enable it on the Maintenance page (or in Airflow). |
+| Heartbeat MERGEs and freshness get slower after hours of running | The hourly `iceberg_maintenance` DAG keeps the heartbeat and metrics tables small. The Airflow container unpauses it on every start; if it was paused by hand in the meantime, enable it on the Maintenance page (or in Airflow) or run `make maintenance-now`. |
 | Start completely fresh | `./scripts/cleanup.sh --volumes && make up` |
 
 ## Cloud deployment notes

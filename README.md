@@ -34,8 +34,9 @@ flowchart LR
   UI[Floe Console] -.-> PG & T & AF & PROM
 ```
 
-<!-- Screenshot of the console Overview page: capture it as docs/console.png once the stack is up, then
-     replace this comment with  ![Floe Console, overview page](docs/console.png)  -->
+![Floe Console, overview page](docs/console.png)
+
+<sub>Light mode shown; [dark mode](docs/console-dark.png) is one click away in the header.</sub>
 
 ## Quick start
 
@@ -77,10 +78,11 @@ Once the stack is up, open **http://localhost:8090** (`make console`). One inter
 | **Time travel** | Every snapshot of a table, a snapshot compared with now, and the history of one row across the last 12 snapshots. |
 | **SQL workbench** | Run the 8 benchmark queries or any read-only query on Trino, see time and rows scanned, export CSV. Runs as Trino user `workbench`, which `config/trino/rules.json` makes read-only on every catalog. |
 | **Maintenance** | Trigger the Airflow compaction, layout and GDPR purge DAGs, follow their tasks, and see the file layout they leave behind. |
+| **GDPR erasure** | Pick a customer, erase them in PostgreSQL and watch the delete reach Iceberg as a merge-on-read delete that time travel can still read. Then run the purge DAG and see the old snapshot disappear. The Overview also shows the Prometheus alert rules and their state. |
 | **Validation** | PostgreSQL vs Iceberg row counts and checksums for every table. |
 | **Benchmark** | The recorded before/after results of `make bench`. |
 
-The console (`src/console/`) is a small Python server using only the standard library and the clients already in the tools image, plus a dependency-free single-page app. Long operations run as background jobs that the page polls. It listens on localhost only, because it can write to the source database.
+The console has a light and a dark mode (toggle in the header, or `?theme=dark` in the URL). The screenshot above is produced by `./scripts/screenshot-console.sh` (headless Chrome on the host). The console (`src/console/`) is a small Python server using only the standard library and the clients already in the tools image, plus a dependency-free single-page app. Long operations run as background jobs that the page polls. It listens on localhost only, because it can write to the source database.
 
 ## Make targets
 
@@ -109,7 +111,7 @@ The console (`src/console/`) is a small Python server using only the standard li
 | 6 | Before/after performance report | `results/benchmark-*/summary.md` (`make bench`) |
 | 7 | Demo video (5–8 min) | script in `docs/DEMO_SCRIPT.md` (link added after recording) |
 | 8 | Technical report (IEEE format, PDF) | [`docs/report/report.pdf`](docs/report/report.pdf); LaTeX source in `docs/report/latex/` (Overleaf-ready zip included), regenerated from results by `docs/report/latex/build_tex.py` |
-| + | Extra credit: GDPR row-level deletes and merge-on-read | `scripts/demos/gdpr_delete.sh`, DAG `iceberg_gdpr_purge` |
+| + | Extra credit: GDPR row-level deletes and merge-on-read | Console page **GDPR erasure**, `scripts/demos/gdpr_delete.sh`, DAG `iceberg_gdpr_purge` |
 | + | Monitoring | `config/monitoring/` (Prometheus, alert rules, Grafana dashboard), `src/consumers/exporter.py` |
 | + | CI | `.github/workflows/build.yml`: lint, unit tests, image build, full-stack integration test |
 | + | Web interface | Floe Console, `src/console/` (http://localhost:8090) |

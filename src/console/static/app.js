@@ -45,6 +45,8 @@ const ICON_PATHS = {
   refresh: "M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7",
   dice: "M4 4h16v16H4zM8.5 8.5h.01M15.5 15.5h.01M15.5 8.5h.01M8.5 15.5h.01M12 12h.01",
   download: "M12 4v11M7 10l5 5 5-5M5 20h14",
+  up: "M12 19V5M5 12l7-7 7 7",
+  down: "M12 5v14M19 12l-7 7-7-7",
 };
 
 function icon(name, size) {
@@ -202,6 +204,13 @@ function dataTable(columns, rows, opts = {}) {
       const v = c.render ? c.render(row) : row[c.key];
       const td = h("td", { class: [c.num ? "num" : "", c.mono ? "mono" : "", c.wrap ? "wrap" : ""].join(" ") });
       if (v === null || v === undefined) { td.classList.add("null"); td.textContent = c.nullText ?? "—"; }
+      else if (c.bar) {
+        const frac = Math.max(0, Math.min(1, Number(c.bar(row)) || 0));
+        const alert = c.alert ? c.alert(row) : false;
+        td.classList.add("barcell");
+        if (alert) td.classList.add("alert-text");
+        td.append(h("i", { class: `cellbar ${alert ? "alert" : ""}`, style: `width:calc(${(frac * 100).toFixed(1)}% - 8px)` }), append(h("span"), [v]));
+      }
       else append(td, [v]);
       tr.append(td);
     }
@@ -219,49 +228,179 @@ function niceMax(v) {
 
 function lineChart(host, points, opts = {}) {
   host.replaceChildren();
+  host.classList.add("chart-host");
   const pts = (points || []).filter((p) => Number.isFinite(p[1]));
   if (pts.length < 2) {
     host.append(h("div", { class: "empty-chart", text: opts.empty || "Collecting data - the exporter reports every 15 s" }));
     return;
   }
-  const W = Math.max(320, Math.round(host.clientWidth || 600)), H = 170, L = 46, R = 10, T = 10, B = 22;
-  const vals = pts.map((p) => p[1]).sort((a, b) => a - b);
+  const W = Math.max(320, Math.round(host.clientWidth || 600)), H = 196, L = 50, R = 16, T = 18, B = 26;
+  const vals = pts.map((p) => p[1]).slice().sort((a, b) => a - b);
   const p90 = vals[Math.floor(vals.length * 0.9)];
+  const median = vals[Math.floor(vals.length / 2)];
   let max = vals[vals.length - 1];
   let clipped = false;
   if (p90 > 0 && max > p90 * 8) { max = p90 * 2; clipped = true; } // one outlier must not flatten the chart
-  const yMax = niceMax(max * 1.05);
+  const thr = opts.threshold;
+  if (thr && thr.value <= max * 1.6) max = Math.max(max, thr.value);
+  const yMax = niceMax(max * 1.08);
   const t0 = pts[0][0], t1 = pts[pts.length - 1][0];
   const x = (t) => L + ((t - t0) / Math.max(1, t1 - t0)) * (W - L - R);
   const y = (v) => T + (1 - Math.min(v, yMax) / yMax) * (H - T - B);
-  const svgEl = s("svg", { class: "chart", viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": opts.label || "chart" });
-  for (let i = 0; i <= 3; i++) {
-    const v = (yMax / 3) * i, yy = y(v);
-    if (i === 0) svgEl.append(s("line", { class: "grid-line base", x1: L, x2: W - R, y1: yy, y2: yy }));
+  const f = opts.fmt || ((n, d = 0) => fmt.num(n, d));
+  const svgEl = s("svg", { class: "chart", viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "img", "aria-label": opts.label || "chart" });
+  for (let i = 0; i <= 4; i++) {
+    const v = (yMax / 4) * i, yy = y(v);
+    svgEl.append(s("line", { class: `grid-line ${i === 0 ? "base" : ""}`, x1: L, x2: W - R, y1: yy, y2: yy }));
     const digits = yMax < 1 ? 2 : yMax < 10 ? 1 : 0;
-    svgEl.append(s("text", { class: "axis", x: L - 8, y: yy + 3.5, "text-anchor": "end" }, (opts.fmt || ((n) => fmt.num(n, 0)))(v, digits)));
+    svgEl.append(s("text", { class: "axis", x: L - 8, y: yy + 3.5, "text-anchor": "end" }, f(v, digits)));
   }
-  for (const frac of [0, 0.5, 1]) {
+  for (const frac of [0, 0.25, 0.5, 0.75, 1]) {
     const t = t0 + (t1 - t0) * frac;
     const label = new Date(t * 1000).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false });
-    svgEl.append(s("text", { class: "axis", x: x(t), y: H - 5, "text-anchor": frac === 0 ? "start" : frac === 1 ? "end" : "middle" }, label));
+    svgEl.append(s("text", { class: "axis", x: x(t), y: H - 6, "text-anchor": frac === 0 ? "start" : frac === 1 ? "end" : "middle" }, label));
   }
   const d = pts.map((p, i) => `${i ? "L" : "M"}${x(p[0]).toFixed(1)},${y(p[1]).toFixed(1)}`).join("");
-  // barcode-style columns under the line, the latest one highlighted
-  pts.forEach((p, i) => {
-    svgEl.append(s("line", { class: i === pts.length - 1 ? "tick-bar now" : "tick-bar", x1: x(p[0]), x2: x(p[0]), y1: y(0), y2: y(p[1]) }));
-  });
-  svgEl.append(s("path", { class: "line", d }));
+  svgEl.append(s("path", { class: "area", d: `${d}L${x(t1).toFixed(1)},${y(0)}L${x(t0).toFixed(1)},${y(0)}Z` }));
+  if (median > 0 && median < yMax) {
+    svgEl.append(s("line", { class: "median", x1: L, x2: W - R, y1: y(median), y2: y(median) }));
+    svgEl.append(s("text", { class: "guide-label", x: W - R, y: y(median) + 13, "text-anchor": "end" }, `median ${f(median, 1)}`));
+  }
+  if (thr) {
+    if (thr.value <= yMax) {
+      svgEl.append(s("line", { class: "threshold", x1: L, x2: W - R, y1: y(thr.value), y2: y(thr.value) }));
+      svgEl.append(s("text", { class: "guide-label alert", x: L + 4, y: y(thr.value) - 4 }, thr.label || `alert ${f(thr.value)}`));
+    } else {
+      svgEl.append(s("text", { class: "guide-label alert", x: L + 4, y: T + 2 }, `${thr.label || "alert"} - off scale`));
+    }
+  }
+  svgEl.append(s("path", { class: "line", d, pathLength: 1 }));
   if (clipped) {
     for (const p of pts) if (p[1] > yMax) {
       svgEl.append(s("path", { class: "clip-mark", d: `M${x(p[0]) - 4},${T + 7}L${x(p[0]) + 4},${T + 7}L${x(p[0])},${T}Z` },
-        s("title", {}, `${(opts.fmt || fmt.int)(p[1])} (off scale)`)));
+        s("title", {}, `${f(p[1], 1)} (off scale)`)));
     }
   }
   const last = pts[pts.length - 1];
   svgEl.append(s("line", { class: "now-line", x1: x(last[0]), x2: x(last[0]), y1: T, y2: y(0) }));
-  svgEl.append(s("circle", { class: "chart-dot", cx: x(last[0]), cy: y(last[1]), r: 3.5 }));
-  host.append(svgEl);
+  svgEl.append(s("circle", { class: "chart-pulse", cx: x(last[0]), cy: y(last[1]), r: 4.5 }));
+  svgEl.append(s("circle", { class: "chart-dot", cx: x(last[0]), cy: y(last[1]), r: 4.5 }));
+  const label = f(last[1], 1);
+  const pw = label.length * 7 + 14, px = Math.min(x(last[0]) - pw / 2, W - R - pw), py = Math.max(T - 4, y(last[1]) - 30);
+  svgEl.append(s("g", { class: "now-pill" }, s("rect", { x: px, y: py, width: pw, height: 20, rx: 10 }),
+    s("text", { x: px + pw / 2, y: py + 14, "text-anchor": "middle" }, label)));
+
+  // hover: crosshair + tooltip on the nearest sample
+  const cross = s("line", { class: "crosshair", x1: 0, x2: 0, y1: T, y2: y(0), visibility: "hidden" });
+  const focus = s("circle", { class: "focus", r: 4, visibility: "hidden" });
+  const zone = s("rect", { class: "hover-zone", x: L, y: 0, width: W - L - R, height: H });
+  const tip = h("div", { class: "chart-tip", hidden: true });
+  svgEl.append(cross, focus, zone);
+  zone.addEventListener("mousemove", (ev) => {
+    const rect = svgEl.getBoundingClientRect();
+    const mx = (ev.clientX - rect.left) * (W / rect.width);
+    let best = pts[0], bd = Infinity;
+    for (const p of pts) { const dd = Math.abs(x(p[0]) - mx); if (dd < bd) { bd = dd; best = p; } }
+    const cx = x(best[0]);
+    cross.setAttribute("x1", cx); cross.setAttribute("x2", cx); cross.setAttribute("visibility", "visible");
+    focus.setAttribute("cx", cx); focus.setAttribute("cy", y(best[1])); focus.setAttribute("visibility", "visible");
+    tip.hidden = false;
+    tip.style.left = `${Math.max(60, Math.min(rect.width - 60, cx * (rect.width / W)))}px`;
+    tip.replaceChildren(h("b", { text: f(best[1], 1) }), h("small", { text: new Date(best[0] * 1000).toLocaleTimeString("en-GB", { hour12: false }) }));
+  });
+  zone.addEventListener("mouseleave", () => { cross.setAttribute("visibility", "hidden"); focus.setAttribute("visibility", "hidden"); tip.hidden = true; });
+  host.append(svgEl, tip);
+}
+
+function sparkline(points) {
+  const pts = (points || []).filter((p) => Number.isFinite(p[1]));
+  if (pts.length < 2) return null;
+  const W = 200, H = 44, T = 4, B = 4;
+  const vals = pts.map((p) => p[1]).slice().sort((a, b) => a - b);
+  const p90 = vals[Math.floor(vals.length * 0.9)];
+  let max = vals[vals.length - 1];
+  if (p90 > 0 && max > p90 * 8) max = p90 * 2;
+  max = max > 0 ? max * 1.05 : 1;
+  const t0 = pts[0][0], t1 = pts[pts.length - 1][0];
+  const x = (t) => ((t - t0) / Math.max(1, t1 - t0)) * W;
+  const y = (v) => T + (1 - Math.min(v, max) / max) * (H - T - B);
+  const d = pts.map((p, i) => `${i ? "L" : "M"}${x(p[0]).toFixed(1)},${y(p[1]).toFixed(1)}`).join("");
+  const last = pts[pts.length - 1];
+  return s("svg", { class: "spark", viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", "aria-hidden": "true" },
+    s("line", { class: "base", x1: 0, x2: W, y1: H - B + 0.5, y2: H - B + 0.5 }),
+    s("path", { class: "area", d: `${d}L${W},${H - B}L0,${H - B}Z` }),
+    s("path", { class: "line", d, pathLength: 1, "vector-effect": "non-scaling-stroke" }),
+    s("circle", { class: "now", cx: x(last[0]), cy: y(last[1]), r: 3.5, "vector-effect": "non-scaling-stroke" }));
+}
+
+// change over the last five minutes of a series: [t, v] samples
+function delta(points, window = 300) {
+  const pts = (points || []).filter((p) => Number.isFinite(p[1]));
+  if (pts.length < 2) return null;
+  const last = pts[pts.length - 1];
+  const ref = [...pts].reverse().find((p) => p[0] <= last[0] - window) || pts[0];
+  if (last[0] - ref[0] < window * 0.5) return null;
+  return { now: last[1], before: ref[1], abs: last[1] - ref[1] };
+}
+
+function deltaChip(d, opts = {}) {
+  if (!d) return null;
+  const f = opts.fmt || ((v) => fmt.num(v, 1));
+  const eps = opts.eps ?? 0;
+  if (Math.abs(d.abs) <= eps) return h("span", { class: "delta", title: "no change over the last 5 min", text: "steady" });
+  const up = d.abs > 0;
+  const good = opts.good === "down" ? !up : opts.good === "up" ? up : null;
+  const kind = good === null ? "" : good ? "good" : "bad";
+  return h("span", { class: `delta ${kind}`, title: `${f(d.before)} five minutes ago` }, icon(up ? "up" : "down", 10), f(Math.abs(d.abs)));
+}
+
+// stacked columns: inserts / updates / deletes per micro-batch
+function stackChart(host, batches, opts = {}) {
+  host.replaceChildren();
+  const by = new Map();
+  for (const b of batches) {
+    const e = by.get(b.batch_id) || { id: b.batch_id, ins: 0, upd: 0, del: 0, at: b.batch_finished_at };
+    e.ins += b.inserts || 0; e.upd += b.updates || 0; e.del += b.deletes || 0;
+    by.set(b.batch_id, e);
+  }
+  const rows = [...by.values()].sort((a, b) => a.id - b.id).slice(-opts.limit || -28);
+  if (rows.length < 2) return;
+  const W = Math.max(320, Math.round(host.clientWidth || 600)), H = 130, L = 44, R = 8, T = 10, B = 20;
+  const totals = rows.map((r) => r.ins + r.upd + r.del).sort((a, b) => a - b);
+  const p90 = totals[Math.floor(totals.length * 0.9)];
+  let top = totals[totals.length - 1];
+  if (p90 > 0 && top > p90 * 4) top = p90 * 2.2; // the initial load must not flatten the live batches
+  const max = niceMax(Math.max(1, top));
+  const slot = (W - L - R) / rows.length, bw = Math.max(3, Math.min(22, slot - 4));
+  const y = (v) => T + (1 - Math.min(v, max) / max) * (H - T - B);
+  const svgEl = s("svg", { class: "stack-chart", viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "img", "aria-label": "Change events per micro-batch" });
+  for (let i = 0; i <= 2; i++) {
+    const v = (max / 2) * i;
+    svgEl.append(s("line", { class: "grid-line", x1: L, x2: W - R, y1: y(v), y2: y(v) }));
+    svgEl.append(s("text", { class: "axis", x: L - 8, y: y(v) + 3.5, "text-anchor": "end" }, fmt.int(v)));
+  }
+  rows.forEach((r, i) => {
+    const cx = L + slot * i + slot / 2 - bw / 2;
+    let acc = 0;
+    for (const [k, cls] of [["ins", "ins"], ["upd", "upd"], ["del", "del"]]) {
+      if (!r[k]) continue;
+      const y1 = y(acc + r[k]), y2 = y(acc);
+      svgEl.append(s("rect", { class: cls, x: cx, y: y1, width: bw, height: Math.max(1, y2 - y1 - (acc ? 1.5 : 0)), rx: 2 },
+        s("title", {}, `batch ${r.id} · ${fmt.int(r.ins)} inserts, ${fmt.int(r.upd)} updates, ${fmt.int(r.del)} deletes · ${fmt.ago(r.at)}`)));
+      acc += r[k];
+    }
+    if (acc > max) svgEl.append(s("path", { class: "del", d: `M${cx + bw / 2 - 4},${T + 6}L${cx + bw / 2 + 4},${T + 6}L${cx + bw / 2},${T - 1}Z` },
+      s("title", {}, `batch ${r.id}: ${fmt.int(acc)} events (off scale)`)));
+    if (i === 0 || i === rows.length - 1 || i % Math.ceil(rows.length / 6) === 0) {
+      svgEl.append(s("text", { class: "axis", x: cx + bw / 2, y: H - 5, "text-anchor": "middle" }, `#${r.id}`));
+    }
+  });
+  host.append(
+    h("div", { class: "legend-row" },
+      h("span", {}, h("i", { style: "background:var(--accent-strong)" }), "inserts"),
+      h("span", {}, h("i", { style: "background:var(--accent)" }), "updates"),
+      h("span", {}, h("i", { style: "background:var(--alert)" }), "deletes")),
+    svgEl);
 }
 
 // ------------------------------------------------------------------ router
@@ -272,8 +411,9 @@ const ROUTES = {
   "time-travel": { eyebrow: "04 · Inspect", title: "Time travel", sub: "Every micro-batch is an Iceberg snapshot - query any of them", render: viewTimeTravel },
   sql: { eyebrow: "05 · Query", title: "SQL workbench", sub: "Read-only Trino queries over lakehouse, postgresql and tpch catalogs", render: viewSql },
   maintenance: { eyebrow: "06 · Optimise", title: "Maintenance", sub: "Airflow DAGs that compact, re-layout and purge the Iceberg tables", render: viewMaintenance },
-  validate: { eyebrow: "07 · Verify", title: "Validation", sub: "PostgreSQL vs Iceberg: row counts and order-independent checksums", render: viewValidate },
-  results: { eyebrow: "08 · Evaluate", title: "Benchmark", sub: "Recorded results of make bench (TPC-H sf1)", render: viewResults },
+  gdpr: { eyebrow: "07 · Comply", title: "Right to erasure", sub: "A GDPR delete reaches Iceberg as a merge-on-read delete - the purge makes it physical", render: viewGdpr },
+  validate: { eyebrow: "08 · Verify", title: "Validation", sub: "PostgreSQL vs Iceberg: row counts and order-independent checksums", render: viewValidate },
+  results: { eyebrow: "09 · Evaluate", title: "Benchmark", sub: "Recorded results of make bench (TPC-H sf1)", render: viewResults },
 };
 
 let ctx = null;
@@ -301,6 +441,10 @@ function navigate() {
   view.replaceChildren();
   setHero(null);
   window.scrollTo(0, 0);
+  // entrance motion only on the first paint of a page: later refreshes must not flicker
+  view.classList.add("fresh");
+  clearTimeout(navigate.freshTimer);
+  navigate.freshTimer = setTimeout(() => view.classList.remove("fresh"), 2600);
   Promise.resolve(route.render(view, ctx, params)).catch((e) => view.append(errorBanner(e)));
 }
 
@@ -364,18 +508,20 @@ const SIDE = ["minio", "airflow", "prometheus", "grafana"];
 
 function nodeEl(c) {
   return h("div", { class: `node ${c.ok ? "" : "bad"}` },
+    h("i", { class: "packet", "aria-hidden": "true" }),
     h("div", { class: "node-top" }, dot(c.ok ? "ok" : "bad"), h("span", { class: "node-name", text: c.name }),
       c.link ? h("a", { class: "open", href: c.link, target: "_blank", rel: "noopener", title: `Open the ${c.name} UI`, "aria-label": `Open the ${c.name} UI` }, icon("external", 13)) : null),
     h("div", { class: "node-role", text: c.role }),
     h("div", { class: "node-detail", text: c.detail, title: c.detail }));
 }
 
-function kpi(label, value, unit, note, kind, fraction) {
+function kpi(label, value, unit, note, kind, fraction, opts = {}) {
+  const spark = opts.series ? sparkline(opts.series) : null;
   return h("div", { class: "kpi" },
-    h("div", { class: "kpi-label" }, kind ? dot(kind) : null, label),
+    h("div", { class: "kpi-label" }, kind ? dot(kind) : null, label, opts.series ? deltaChip(delta(opts.series), opts) : null),
     h("div", { class: "kpi-value" }, value, unit ? h("small", { text: unit }) : null),
     note ? h("div", { class: "kpi-note", text: note }) : null,
-    fraction === undefined || fraction === null ? null : meter(fraction));
+    spark || (fraction === undefined || fraction === null ? null : meter(fraction)));
 }
 
 // filled share + highlight + tick track (scale of the KPI against its target)
@@ -397,7 +543,7 @@ function setHero(items) {
     const it = items[i];
     host.replaceChildren(
       h("div", { class: "hero-head" }, icon("live", 15), h("span", { text: it.title }), h("a", { href: it.href, class: "hero-go", "aria-label": "Open" }, icon("external", 14))),
-      h("p", { class: "hero-text" }, ...it.text),
+      h("p", { class: `hero-text ${it.text.map((x) => (x instanceof Node ? x.textContent : String(x))).join("").length > 95 ? "long" : ""}` }, ...it.text),
       h("div", { class: "hero-dots" }, items.map((_, j) => h("i", { class: j === i ? "on" : "" }))));
     host.dataset.index = String(i);
   };
@@ -413,6 +559,9 @@ async function viewOverview(view, ctx) {
   const checked = h("span", { class: "hint" });
   const chartF = h("div"), chartI = h("div");
   const batchesHost = h("div");
+  const batchChartHost = h("div");
+  const alertsHost = h("div", { class: "alerts" }, [1, 2, 3, 4, 5].map(() => h("div", { class: "alert" }, h("div", { class: "skeleton", style: "height:44px" }))));
+  const alertsChip = h("span");
   let hideProbe = true;
   const probeBtn = button("Show heartbeat", () => {
     hideProbe = !hideProbe;
@@ -429,9 +578,11 @@ async function viewOverview(view, ctx) {
       card("End-to-end freshness", "heartbeat age in Iceberg · last 30 min", chartF),
       card("Ingest rate", "records merged per second · last 30 min", chartI)),
     h("div", { class: "split" }, workloadCard(ctx),
-      card("Recent micro-batches", "lakehouse.ops.ingest_batches", batchesHost, probeBtn)));
+      card("Recent micro-batches", "lakehouse.ops.ingest_batches", [batchChartHost, batchesHost], probeBtn)),
+    card("Alert rules", "Prometheus · config/monitoring/alerts.yml", alertsHost, alertsChip));
 
   let metrics = null;
+  const lastKpiText = {};
   ctx.every(5000, async () => {
     const status = await api("/api/status");
     globalState.status = status;
@@ -461,15 +612,25 @@ async function viewOverview(view, ctx) {
     const [lagNum, lagUnit] = fmt.bytes(metrics.slot_lag_bytes).split(" ");
     const lagKind = metrics.slot_lag_bytes === null ? "" : metrics.slot_lag_bytes < 64 * 1024 * 1024 ? "ok" : "warn";
     kpis.replaceChildren(
-      kpi("Freshness", f === null ? "—" : fmt.num(f, 1), "s", "PostgreSQL commit → queryable in Trino", fKind, f === null ? null : f / 60),
+      kpi("Freshness", f === null ? "—" : f >= 120 ? fmt.secs(f) : fmt.num(f, 1), f === null || f >= 120 ? null : "s",
+        f >= 120 ? "last heartbeat merged into Iceberg this long ago" : "PostgreSQL commit → queryable in Trino", fKind, f === null ? null : f / 60,
+        { series: metrics.series.freshness, good: "down", fmt: (v) => fmt.secs(v), eps: 0.5 }),
       kpi("Ingest rate", fmt.num(metrics.ingest_rps || 0, 1), "rec/s", `${fmt.int(metrics.batches_5m)} micro-batches in 5 min`,
-        null, (metrics.ingest_rps || 0) / Math.max(1, ...metrics.series.ingest.map((p) => p[1]))),
-      kpi("Replication lag", lagNum, lagUnit || null, "WAL not yet confirmed by Debezium", lagKind, (metrics.slot_lag_bytes || 0) / (64 * 1024 * 1024)),
+        null, (metrics.ingest_rps || 0) / Math.max(1, ...metrics.series.ingest.map((p) => p[1])),
+        { series: metrics.series.ingest, good: "up", fmt: (v) => `${fmt.num(v, 1)} rec/s`, eps: 0.2 }),
+      kpi("Replication lag", lagNum, lagUnit || null, "WAL not yet confirmed by Debezium", lagKind, (metrics.slot_lag_bytes || 0) / (64 * 1024 * 1024),
+        { series: metrics.series.slot_lag, good: "down", fmt: (v) => fmt.bytes(v), eps: 4096 }),
       kpi("Last micro-batch", metrics.last_batch_age_s === null ? "—" : fmt.num(metrics.last_batch_age_s, 0), "s ago", "Spark trigger every 10 s",
         null, metrics.last_batch_age_s === null ? null : metrics.last_batch_age_s / 30),
       kpi("Rows in lakehouse", fmt.int(metrics.lake_rows), null, `source ${fmt.num(metrics.source_tps || 0, 1)} commits/s`));
+    kpis.querySelectorAll(".kpi-value").forEach((el, i) => {
+      const text = el.textContent;
+      if (lastKpiText[i] !== undefined && lastKpiText[i] !== text) el.classList.add("tick");
+      lastKpiText[i] = text;
+    });
     setHero([
       { title: "Freshness", href: "#/live", text: f === null ? ["Waiting for the first heartbeat."] :
+        f >= 120 ? ["Iceberg is ", h("b", { text: fmt.secs(f) }), " behind PostgreSQL - the streaming job is catching up on the heartbeat table"] :
         ["Right now, a change committed in PostgreSQL is ", h("b", { text: "queryable in Iceberg" }), " after ", h("b", { text: `${fmt.num(f, 1)} seconds` })] },
       { title: "Throughput", href: "#/overview", text: ["The streaming job merged ", h("b", { text: `${fmt.int(metrics.batches_5m)} micro-batches` }), " in the last five minutes, ", h("b", { text: `${fmt.num(metrics.ingest_rps || 0, 1)} records/s` })] },
       { title: "Lakehouse", href: "#/tables", text: [h("b", { text: `${fmt.int(metrics.lake_rows)} rows` }), " live in Apache Iceberg, every change kept as a ", h("b", { text: "queryable snapshot" })] },
@@ -478,22 +639,44 @@ async function viewOverview(view, ctx) {
   });
 
   async function loadBatches() {
-    const data = await api("/api/batches?limit=80");
-    const rows = data.batches.filter((b) => !hideProbe || b.table_name !== "shop.cdc_probe").slice(0, 14);
+    const data = await api("/api/batches?limit=120");
+    const all = data.batches.filter((b) => !hideProbe || b.table_name !== "shop.cdc_probe");
+    const rows = all.slice(0, 10);
+    stackChart(batchChartHost, all, { limit: 30 });
+    const maxEvents = Math.max(1, ...rows.map((r) => r.kafka_records || 0));
+    const maxMerge = Math.max(1, ...rows.map((r) => r.merge_ms || 0));
     batchesHost.replaceChildren(dataTable([
       { label: "Batch", key: "batch_id", mono: true },
       { label: "Table", render: (r) => r.table_name.replace("shop.", "") },
-      { label: "Events", key: "kafka_records", num: true, render: (r) => fmt.int(r.kafka_records) },
+      { label: "Events", num: true, render: (r) => fmt.int(r.kafka_records), bar: (r) => r.kafka_records / maxEvents },
       { label: "Ins / upd / del", num: true, render: (r) => `${fmt.int(r.inserts)} / ${fmt.int(r.updates)} / ${fmt.int(r.deletes)}` },
-      { label: "MERGE", num: true, render: (r) => fmt.ms(r.merge_ms) },
+      { label: "MERGE", num: true, render: (r) => fmt.ms(r.merge_ms), bar: (r) => r.merge_ms / maxMerge, alert: (r) => r.merge_ms >= 10000 },
       { label: "Finished", render: (r) => fmt.ago(r.batch_finished_at) },
     ], rows, { empty: hideProbe ? "No data micro-batches yet - start the workload" : "No micro-batches yet" }));
   }
   ctx.every(5000, loadBatches);
+
+  ctx.every(10000, async () => {
+    try {
+      const a = await api("/api/alerts");
+      const kind = a.firing ? "bad" : a.pending ? "warn" : "ok";
+      alertsChip.replaceChildren(chip(a.firing ? `${a.firing} firing` : a.pending ? `${a.pending} pending` : "all quiet", kind));
+      alertsHost.replaceChildren(...a.rules.map((r) => h("div", { class: `alert ${r.state}` },
+        h("div", { class: "alert-top" }, dot(r.state === "firing" ? "bad" : r.state === "pending" ? "warn" : "ok", r.state !== "inactive"),
+          h("span", { class: "name", text: r.name }), chip(r.state === "inactive" ? "ok" : r.state, r.state === "firing" ? "bad" : r.state === "pending" ? "warn" : "")),
+        h("p", { text: r.summary || "" }),
+        h("code", { title: r.expr, text: `${r.expr}${r.for_seconds ? ` for ${fmt.secs(r.for_seconds)}` : ""}` }))));
+    } catch (e) {
+      alertsChip.replaceChildren(chip("unavailable", "warn"));
+      alertsHost.replaceChildren(h("div", { class: "empty", text: e.message }));
+    }
+  });
+
   function drawCharts() {
     if (!metrics || metrics.error) return;
-    lineChart(chartF, metrics.series.freshness, { fmt: (v, d = 0) => `${fmt.num(v, d)}s`, label: "End-to-end freshness" });
-    lineChart(chartI, metrics.series.ingest, { fmt: (v, d = 0) => fmt.num(v, d), label: "Ingest rate" });
+    lineChart(chartF, metrics.series.freshness, { fmt: (v, d = 0) => `${fmt.num(v, d)} s`, label: "End-to-end freshness",
+      threshold: { value: 120, label: "alert · 2 min behind" } });
+    lineChart(chartI, metrics.series.ingest, { fmt: (v, d = 0) => `${fmt.num(v, d)}`, label: "Ingest rate" });
   }
   ctx.on(window, "resize", drawCharts);
 }
@@ -1097,6 +1280,146 @@ async function viewMaintenance(view, ctx) {
   loadFiles();
 }
 
+// ------------------------------------------------------------------ GDPR: right to erasure
+async function viewGdpr(view, ctx) {
+  const keyInput = h("input", { class: "input", inputmode: "numeric", placeholder: "random customer with orders", "aria-label": "Customer key" });
+  const subjectHost = h("div");
+  const eraseBtn = button("Erase in PostgreSQL", onErase, { kind: "primary", icon: "stop", disabled: true });
+  const pause = h("input", { type: "checkbox", id: "pause-wl", checked: true });
+  const purgeBtn = button("Run the purge DAG", onPurge, { kind: "primary", icon: "play", disabled: true });
+  const purgeBox = h("div", { class: "stack" },
+    h("p", { class: "dim", style: "margin:0", text: "The purge DAG rewrites every data file that has deletes and expires the snapshots that could still read the row. Time travel across the erasure is lost on purpose." }),
+    h("label", { class: "check", for: "pause-wl" }, pause, "Pause the workload while it runs (comparable before/after)"),
+    h("div", {}, purgeBtn));
+  const purgeCard = card("Purge", "make it physical", purgeBox);
+  purgeCard.hidden = true;
+  const story = h("div", { class: "stack" }, h("div", { class: "empty", text: "Pick a customer on the left. Every step on this page is measured against the running stack." }));
+  let subject = null, erased = null;
+
+  async function loadSubject(key) {
+    subjectHost.replaceChildren(h("div", { class: "skeleton", style: "height:110px" }));
+    try {
+      subject = await api(`/api/gdpr/candidate${key ? `?key=${encodeURIComponent(key)}` : ""}`);
+      keyInput.value = subject.key;
+      const c = subject.customer;
+      subjectHost.replaceChildren(h("div", { class: "subject" },
+        stat("Customer", `#${subject.key} · ${c.c_name}`), stat("Phone", c.c_phone),
+        stat("Address", c.c_address, true), stat("Balance", c.c_acctbal),
+        stat("Orders held", `${fmt.int(subject.orders)} · ${fmt.num(subject.order_total, 2)} total`, true)));
+      eraseBtn.disabled = false;
+      erased = null;
+      purgeCard.hidden = true;
+      setHero([{ title: "Right to erasure", href: "#/gdpr", text: ["Customer ", h("b", { text: `#${subject.key}` }), " asks to be forgotten: ", h("b", { text: `${fmt.int(subject.orders)} orders` }), " and a row held in every Iceberg snapshot."] }]);
+    } catch (e) { subject = null; eraseBtn.disabled = true; subjectHost.replaceChildren(errorBanner(e)); }
+  }
+
+  function stat(label, value, wide) {
+    return h("div", { class: `stat ${wide ? "wide" : ""}` }, h("span", { text: label }), h("b", { text: value ?? "—" }));
+  }
+
+  async function onErase(ev) {
+    if (!subject) return;
+    await busy(ev.currentTarget, async () => {
+      let job;
+      try { job = await api("/api/gdpr/erase", { body: { key: subject.key } }); } catch (e) { toast(e.message, "bad"); return; }
+      const done = await followJob(job, (j) => renderErase(j), ctx);
+      if (done.state === "done") {
+        erased = done.result;
+        purgeCard.hidden = false;
+        purgeBtn.disabled = false;
+        eraseBtn.disabled = true;
+        setHero([{ title: "Right to erasure", href: "#/gdpr", text: ["Customer ", h("b", { text: `#${erased.key}` }), " is gone from every query after ", h("b", { text: `${erased.latency_s.toFixed(1)} s` }), erased.still_readable ? " - but time travel still reads the data" : ""] }]);
+      } else if (done.state === "failed") toast(done.error, "bad");
+    });
+  }
+
+  async function onPurge(ev) {
+    if (!erased) return;
+    await busy(ev.currentTarget, async () => {
+      let job;
+      try { job = await api("/api/gdpr/purge", { body: { key: erased.key, snapshot_id: erased.snapshot_id, pause_workload: pause.checked } }); }
+      catch (e) { toast(e.message, "bad"); return; }
+      const done = await followJob(job, (j) => renderPurge(j), ctx);
+      if (done.state === "done") {
+        purgeBtn.disabled = true;
+        const r = done.result;
+        setHero([{ title: "Right to erasure", href: "#/gdpr", text: r.history.readable ? ["The personal data of ", h("b", { text: `#${r.key}` }), " is ", h("b", { text: "still readable" }), " - the purge did not expire the snapshot"] :
+          ["The personal data of customer ", h("b", { text: `#${r.key}` }), " no longer exists ", h("b", { text: "anywhere in storage" }), " - ", fmt.secs(r.wall_seconds), " of maintenance"] }]);
+        toast("Erasure complete", "ok");
+      } else if (done.state === "failed") toast(done.error, "bad");
+    });
+  }
+
+  function step(state, title, text, time) {
+    return h("li", { class: `step ${state}` }, h("span", { class: "mark" }), h("div", {}, h("h4", { text: title }), text instanceof Node ? text : h("p", { text })), h("time", { text: time || "" }));
+  }
+
+  function filesText(f) { return `${fmt.int(f.data_files)} data files · ${fmt.int(f.delete_files)} delete files · ${fmt.int(f.snapshots)} snapshots`; }
+
+  function renderErase(job) {
+    const log = job.log || [];
+    const r = job.result;
+    if (job.state === "failed") { story.replaceChildren(h("div", { class: "banner bad" }, h("div", {}, h("h3", { text: "Erasure failed" }), h("p", { text: job.error })))); return; }
+    const committed = log.some((l) => l.msg.startsWith("PostgreSQL commit"));
+    const gone = Boolean(r);
+    story.replaceChildren();
+    append(story, [
+      h("div", { class: "row" },
+        h("div", { class: "latency" }, h("b", { text: r ? r.latency_s.toFixed(1) : "…" }), h("span", { text: "s until the row is gone from every Iceberg query" })),
+        h("span", { style: "margin-left:auto" }, chip(gone ? "erased from queries" : "erasing", gone ? "ok" : "accent"))),
+      h("ol", { class: "steps" },
+        step(committed ? "done" : "active", "Committed in PostgreSQL", committed ? log.find((l) => l.msg.startsWith("PostgreSQL commit")).msg.replace("PostgreSQL commit: ", "") : "one transaction: the orders, then the customer", r ? fmt.time(r.committed_at) : ""),
+        step(gone ? "done" : committed ? "active" : "", "Gone from the current snapshot", gone ? `lakehouse.shop.customer and .orders · ${r.polls} polls` : "Debezium publishes delete events; Spark MERGEs them (WHEN MATCHED AND op = 'd' THEN DELETE)", r ? `+${r.latency_s.toFixed(2)} s` : ""),
+        step(gone ? "done" : "", "Merge-on-read: nothing rewritten", gone ? h("div", {}, h("p", { text: `customer: ${filesText(r.files_after)}` }), h("p", { class: "muted", text: `before the delete: ${filesText(r.files_before)}. The delete only added a position-delete file; the data file still holds the row.` })) : "the delete is recorded in a small position-delete file"),
+        step(gone ? (r.still_readable ? "done" : "") : "", "Still readable through time travel", gone ? (r.still_readable
+          ? h("div", {}, h("p", { text: `SELECT … FROM customer FOR VERSION AS OF ${r.snapshot_id} WHERE c_custkey = ${r.key}` }),
+            h("dl", { class: "ghost-row" }, ...Object.entries(r.still_readable).flatMap(([k, v]) => [h("dt", { text: k }), h("dd", { text: v ?? "—" })])))
+          : h("p", { text: "the remembered snapshot no longer holds the row" })) : "the pre-erasure snapshot can still be queried")),
+      gone ? h("div", { class: "banner" }, h("div", {}, h("h3", { text: "The right to erasure is not satisfied yet" }),
+        h("p", { text: "Delete files hide the row, they do not remove it. Run the purge DAG to rewrite the files and expire the history." }))) : null]);
+  }
+
+  function renderPurge(job) {
+    const r = job.result;
+    const log = job.log || [];
+    if (job.state === "failed") { story.append(h("div", { class: "banner bad" }, h("div", {}, h("h3", { text: "Purge failed" }), h("p", { text: job.error })))); return; }
+    let host = story.querySelector(".purge");
+    if (!host) { host = h("div", { class: "purge stack" }); story.append(host); }
+    const tasks = log.filter((l) => l.msg.startsWith("task ")).map((l) => l.msg.slice(5));
+    const banner = story.querySelector(".banner:not(.ok):not(.bad)");
+    if (banner) banner.remove();
+    host.replaceChildren();
+    append(host, [
+      h("ol", { class: "steps" },
+        step(r ? "done" : "active", "Purge DAG iceberg_gdpr_purge", r ? `${r.tasks.map((t) => `${t.task_id} ${t.state}`).join(" · ")} · ${fmt.secs(r.wall_seconds)} wall` : (tasks.length ? tasks[tasks.length - 1] : "triggering the Airflow run…")),
+        step(r ? "done" : "", "Files rewritten, history expired", r ? h("div", { class: "pair-stat" },
+          h("div", {}, "Data files", h("b", { text: `${fmt.int(r.files_before.data_files)} → ${fmt.int(r.files_after.data_files)}` })),
+          h("div", {}, "Delete files", h("b", { text: `${fmt.int(r.files_before.delete_files)} → ${fmt.int(r.files_after.delete_files)}` })),
+          h("div", {}, "Snapshots", h("b", { text: `${fmt.int(r.files_before.snapshots)} → ${fmt.int(r.files_after.snapshots)}` }))) : "rewrite_data_files with a delete-file threshold of 1, then expire_snapshots keeping only the newest"),
+        step(r ? "done" : "", "Time travel to the old snapshot", r ? (r.history.readable
+          ? h("p", { class: "error-text", text: "the row is still readable - the snapshot was not expired" })
+          : h("p", { text: `FOR VERSION AS OF ${r.snapshot_id} → ${r.history.error || "the snapshot no longer holds the row"}` })) : "will fail once the snapshot is expired")),
+      r ? h("div", { class: `banner ${r.history.readable ? "bad" : "ok"}` }, h("div", {},
+        h("h3", { text: r.history.readable ? "Not erased" : `Customer #${r.key} is erased from storage` }),
+        h("p", { text: r.history.readable ? "Check the Airflow run." : "No current query, no time-travel query and no file in MinIO holds the personal data any more." }))) : null,
+      logView(job)]);
+  }
+
+  const randomBtn = button("Random", () => loadSubject(""), { icon: "dice" });
+  const showBtn = button("Show customer", () => loadSubject(keyInput.value.trim()), { kind: "" });
+  view.append(h("div", { class: "split" },
+    h("div", { class: "stack", style: "gap:20px" },
+      card("Erasure request", "the data subject", h("div", { class: "stack" },
+        h("p", { class: "dim", style: "margin:0", text: "A customer asks to be forgotten. The operational database deletes their row and their orders; the lakehouse must forget them too, including its history." }),
+        h("div", { class: "row", style: "align-items:end" }, h("label", { class: "field", style: "flex:1" }, h("span", { text: "Customer key" }), keyInput), showBtn, randomBtn),
+        subjectHost,
+        h("div", {}, eraseBtn))),
+      purgeCard),
+    card("What the lakehouse sees", "every timestamp is measured, not estimated", story)));
+  keyInput.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); loadSubject(keyInput.value.trim()); } });
+  loadSubject("");
+}
+
 // ------------------------------------------------------------------ Validation
 async function viewValidate(view, ctx) {
   const wait = h("input", { type: "checkbox", id: "wait" });
@@ -1176,7 +1499,7 @@ async function viewResults(view) {
       kpi("Objects in MinIO", objB ? `−${Math.round((1 - objA / objB) * 100)}` : "—", objB ? "%" : null, `${fmt.int(objB)} → ${fmt.int(objA)} objects, bytes unchanged`)),
     h("div", { class: "split-r" },
       card("Query latency before and after optimisation", "median wall time", h("div", { class: "stack" },
-        h("div", { class: "legend" }, h("span", {}, h("i", { style: "background:var(--line-2)" }), "before"), h("span", {}, h("i", { style: "background:var(--primary)" }), "after layout optimisation")),
+        h("div", { class: "legend" }, h("span", {}, h("i", { style: "background:var(--line-2)" }), "before"), h("span", {}, h("i", { style: "background:var(--accent-strong)" }), "after layout optimisation")),
         bars,
         h("p", { class: "muted", style: "margin:0;font-size:12.5px", text: "Q06 scans the whole table either way, so sorting and partitioning cannot help it." }))),
       card("Optimisation run", `${fmt.secs(b.optimization.wall_seconds)} wall, Airflow DAG`, dataTable([
@@ -1194,6 +1517,11 @@ async function viewResults(view) {
 
 // ------------------------------------------------------------------ boot
 document.getElementById("workload-pill").addEventListener("click", () => { location.hash = "#/overview"; });
+document.getElementById("theme-toggle").addEventListener("click", () => {
+  const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem("floe-theme", next); } catch (e) { /* no storage */ }
+});
 window.addEventListener("hashchange", navigate);
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) return;

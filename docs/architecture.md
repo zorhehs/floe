@@ -24,6 +24,8 @@ The console (`src/console/app.py`, port 8090, bound to localhost) talks to the c
 * **PostgreSQL** (psycopg): writes for the live trace, the workload and schema changes, so every change still travels through Debezium and Spark.
 * **Trino**: every lakehouse read, including `$snapshots`, `$files`, `FOR VERSION AS OF` and the `postgresql` catalog for validation. The SQL workbench connects as Trino user `workbench`. Trino's file-based access control (`config/trino/rules.json`) makes that user read-only on every catalog, so even `EXPLAIN ANALYZE INSERT …` is denied by the engine, not only by the console's keyword check.
 * **Airflow REST API**: trigger and follow the maintenance DAGs.
+* **GDPR erasure page**: deletes the customer and their orders in PostgreSQL (so the change travels through CDC), proves with `FOR VERSION AS OF` that the pre-erasure snapshot still exposes the data, then runs the purge DAG and shows the same query failing. The workload can be paused for the purge so the file counts are comparable.
+* **Prometheus alert rules** (`/api/v1/rules`): the Overview shows every rule with its live state (inactive, pending, firing).
 * **Kafka Connect, Spark UI, Iceberg REST, MinIO, Grafana**: health checks.
 * **Prometheus**: freshness and ingest series.
 

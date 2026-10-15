@@ -188,6 +188,40 @@ def test_unknown_api_is_404_and_bad_input_is_400(base_url):
     assert status == 400
 
 
+def test_gdpr_routes_validate_input(base_url):
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        _get(base_url + "/api/gdpr/candidate?key=abc")
+    assert exc.value.code == 400
+    status, body = _post(base_url + "/api/gdpr/purge", {})
+    assert status == 400 and "snapshot_id" in body["error"]
+    status, body = _post(base_url + "/api/gdpr/purge", {"snapshot_id": "not-a-number"})
+    assert status == 400
+    status, body = _post(base_url + "/api/gdpr/erase", {"key": "1 OR 1=1"})
+    assert status == 400
+
+
+def test_alert_rules_are_sorted_firing_first(monkeypatch):
+    payload = {"data": {"groups": [{"rules": [
+        {"type": "alerting", "name": "Quiet", "state": "inactive", "query": "x > 1", "duration": 120,
+         "annotations": {"summary": "nothing"}, "alerts": []},
+        {"type": "recording", "name": "rec:rate"},
+        {"type": "alerting", "name": "Loud", "state": "firing", "query": "y > 2", "duration": 60,
+         "annotations": {"summary": "bad"}, "alerts": [{"activeAt": "2026-10-15T10:00:00Z"}]},
+        {"type": "alerting", "name": "Maybe", "state": "pending", "query": "z > 3", "alerts": []},
+    ]}]}}
+
+    class R:
+        def json(self):
+            return payload
+
+    monkeypatch.setattr(app, "_get", lambda url, **kw: R())
+    out = app.alert_rules()
+    assert [r["name"] for r in out["rules"]] == ["Loud", "Maybe", "Quiet"]
+    assert out["firing"] == 1 and out["pending"] == 1
+    assert out["rules"][0]["since"] == "2026-10-15T10:00:00Z" and out["rules"][0]["for_seconds"] == 60
+    assert out["rules"][2]["summary"] == "nothing"
+
+
 def test_index_references_existing_assets():
     static = ROOT / "src/console/static"
     html = (static / "index.html").read_text()

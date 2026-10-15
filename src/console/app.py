@@ -397,6 +397,25 @@ def metrics() -> dict:
     return out
 
 
+def alert_rules() -> dict:
+    """Prometheus alert rules (config/monitoring/alerts.yml) with their live state."""
+    r = _get(f"{PROMETHEUS_URL}/api/v1/rules", params={"type": "alert"}).json()
+    rules = []
+    for group in r["data"].get("groups", []):
+        for rule in group.get("rules", []):
+            if rule.get("type") != "alerting":
+                continue
+            active = [a.get("activeAt") for a in rule.get("alerts", []) if a.get("activeAt")]
+            rules.append({"name": rule["name"], "state": rule.get("state") or "inactive",
+                          "summary": (rule.get("annotations") or {}).get("summary"),
+                          "expr": rule.get("query"), "for_seconds": rule.get("duration"),
+                          "since": min(active) if active else None})
+    order = {"firing": 0, "pending": 1, "inactive": 2}
+    rules.sort(key=lambda a: (order.get(a["state"], 3), a["name"]))
+    return {"rules": rules, "firing": sum(a["state"] == "firing" for a in rules),
+            "pending": sum(a["state"] == "pending" for a in rules), "checked_at": utcnow()}
+
+
 def recent_batches(limit: int = 25) -> list[dict]:
     limit = max(1, min(int(limit), 200))
     return trino_dicts(f"""
@@ -976,6 +995,141 @@ def recorded_results() -> dict:
     return out
 
 
+
+# ---------------------------------------------------------------------------
+# GDPR right to erasure: delete in PostgreSQL, show the merge-on-read delete and
+# the time-travel loophole, then purge the history physically
+# ---------------------------------------------------------------------------
+def file_counts(t: Trino, table: str) -> dict:
+    files = {c: n for c, n in t.rows(f'SELECT content, count(*) FROM {LAKE}."{table}$files" GROUP BY content')}
+    snapshots = t.scalar(f'SELECT count(*) FROM {LAKE}."{table}$snapshots"')
+    return {"data_files": files.get(0, 0), "delete_files": files.get(1, 0) + files.get(2, 0),
+            "snapshots": snapshots}
+
+
+def gdpr_candidate(key=None) -> dict:
+    """The data subject of an erasure request: a customer (random: one with orders) and what we hold."""
+    with pg_connect() as conn, conn.cursor() as cur:
+        if key in (None, ""):
+            # sample the orders, not the customers: keys are skewed (TPC-H 1..N, generated ones far
+            # above), and a customer drawn from the orders holds data in both tables by construction
+            cur.execute("SELECT DISTINCT o.o_custkey FROM shop.orders o TABLESAMPLE SYSTEM (1) "
+                        "JOIN shop.customer c ON c.c_custkey = o.o_custkey LIMIT 50")
+            keys = [r[0] for r in cur.fetchall()]
+            if not keys:  # small tables: a 1 % page sample can be empty
+                cur.execute("SELECT o.o_custkey FROM shop.orders o JOIN shop.customer c ON c.c_custkey = o.o_custkey "
+                            "ORDER BY random() LIMIT 1")
+                keys = [r[0] for r in cur.fetchall()]
+            if not keys:
+                cur.execute("SELECT c_custkey FROM shop.customer ORDER BY random() LIMIT 1")
+                keys = [r[0] for r in cur.fetchall()]
+            if not keys:
+                raise ApiError("shop.customer is empty - load data first")
+            key = random.choice(keys)
+        customer = pg_row(cur, "customer", "c_custkey", key)
+        if customer is None:
+            raise ApiError(f"customer {key} does not exist in PostgreSQL", HTTPStatus.NOT_FOUND)
+        cur.execute("SELECT count(*), coalesce(sum(o_totalprice), 0) FROM shop.orders WHERE o_custkey = %s", [key])
+        orders, total = cur.fetchone()
+    return {"key": key, "customer": customer, "orders": orders, "order_total": clean(total)}
+
+
+def ghost_row(t: Trino, snapshot_id: int, key: int) -> dict | None:
+    rows = trino_dicts(f"SELECT c_custkey, c_name, c_phone, c_address, c_acctbal FROM {LAKE}.customer "
+                       f"FOR VERSION AS OF {int(snapshot_id)} WHERE c_custkey = ?", [int(key)])
+    return clean_row(rows[0]) if rows else None
+
+
+def run_gdpr_erase(say, key) -> dict:
+    subject = gdpr_candidate(key)
+    key = subject["key"]
+    t = Trino()
+    snap = t.rows(f'SELECT snapshot_id FROM {LAKE}."customer$snapshots" ORDER BY committed_at DESC LIMIT 1')
+    if not snap:
+        raise ApiError("lakehouse.shop.customer has no snapshot yet - load data first")
+    snapshot_id = int(snap[0][0])
+    before = file_counts(t, "customer")
+    say(f"erasure request for customer {key} ({subject['orders']} orders); remembering snapshot {snapshot_id}")
+
+    with pg_connect(autocommit=False) as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM shop.orders WHERE o_custkey = %s", [key])
+        orders_deleted = cur.rowcount
+        cur.execute("DELETE FROM shop.customer WHERE c_custkey = %s", [key])
+        conn.commit()
+    committed = time.time()
+    say(f"PostgreSQL commit: DELETE {orders_deleted} orders and customer {key} in one transaction")
+
+    deadline, polls = committed + 120, 0
+    while time.time() < deadline:
+        polls += 1
+        c = t.scalar(f"SELECT count(*) FROM {LAKE}.customer WHERE c_custkey = ?", [key])
+        o = t.scalar(f"SELECT count(*) FROM {LAKE}.orders WHERE o_custkey = ?", [key])
+        if c == 0 and o == 0:
+            break
+        time.sleep(0.5)
+    else:
+        raise RuntimeError(f"still in Iceberg after 120 s ({polls} polls) - is the streaming job running?")
+    latency = time.time() - committed
+    say(f"gone from the current Iceberg snapshot after {latency:.1f} s")
+
+    after = file_counts(t, "customer")
+    ghost = ghost_row(t, snapshot_id, key)
+    say("time travel to the remembered snapshot still returns the personal data"
+        if ghost else "the remembered snapshot no longer holds the row")
+    return {"key": key, "customer": subject["customer"], "orders_deleted": orders_deleted,
+            "snapshot_id": str(snapshot_id),
+            "committed_at": datetime.fromtimestamp(committed, timezone.utc).isoformat(),
+            "latency_s": round(latency, 2), "polls": polls, "files_before": before, "files_after": after,
+            "still_readable": ghost, "workload_running": WORKLOAD.state["running"]}
+
+
+def run_gdpr_purge(say, key, snapshot_id: int, pause_workload: bool) -> dict:
+    resume_rate = None
+    if pause_workload and WORKLOAD.state["running"]:
+        resume_rate = WORKLOAD.state["ops_per_sec"]
+        WORKLOAD.stop()
+        say(f"workload paused ({resume_rate:g} ops/s) so the file counts before and after are comparable")
+    t = Trino()
+    before = file_counts(t, "customer")
+    t0 = time.time()
+    run = trigger_dag("iceberg_gdpr_purge", {"tables": "shop.customer,shop.orders"})
+    run_id = run["dag_run_id"]
+    say(f"Airflow run {run_id}: rewrite every file that has deletes, then expire the history")
+    seen: dict[str, str] = {}
+    detail = None
+    try:
+        deadline = time.time() + 1800
+        while time.time() < deadline:
+            detail = dag_run("iceberg_gdpr_purge", run_id)
+            for task in detail["tasks"]:
+                state = task.get("state")
+                if state and seen.get(task["task_id"]) != state:
+                    seen[task["task_id"]] = state
+                    say(f"task {task['task_id']}: {state.replace('_', ' ')}")
+            if detail["run"]["state"] in ("success", "failed"):
+                break
+            time.sleep(3)
+    finally:
+        if resume_rate is not None:
+            WORKLOAD.start(resume_rate)
+            say("workload resumed")
+    state = detail["run"]["state"] if detail else "unknown"
+    if state != "success":
+        raise RuntimeError(f"purge run {run_id} ended in state {state} - see Airflow")
+    after = file_counts(t, "customer")
+    try:
+        ghost = ghost_row(t, snapshot_id, key) if key is not None else None
+        history = {"readable": ghost is not None, "row": ghost, "error": None}
+    except Exception as exc:  # noqa: BLE001 - the expected outcome: the snapshot is gone
+        history = {"readable": False, "row": None, "error": short_error(exc)}
+    say("snapshot expired: " + history["error"] if history["error"] else
+        ("the personal data is STILL readable" if history["readable"] else "the snapshot no longer holds the row"))
+    CACHE.clear()
+    return {"key": key, "snapshot_id": str(snapshot_id), "run": detail["run"], "tasks": detail["tasks"],
+            "wall_seconds": round(time.time() - t0, 1), "files_before": before, "files_after": after,
+            "history": history, "workload_resumed": resume_rate}
+
+
 # ---------------------------------------------------------------------------
 # HTTP layer
 # ---------------------------------------------------------------------------
@@ -1168,6 +1322,41 @@ def api_load(q, body):
 @route("GET", "/api/results")
 def api_results(q, body):
     return CACHE.get("results", 30, recorded_results)
+
+
+@route("GET", "/api/alerts")
+def api_alerts(q, body):
+    return CACHE.get("alerts", 5, alert_rules)
+
+
+def _number(value, what: str):
+    if value in (None, ""):
+        return None
+    if not str(value).lstrip("-").isdigit():
+        raise ApiError(f"{what} must be a number")
+    return int(value)
+
+
+@route("GET", "/api/gdpr/candidate")
+def api_gdpr_candidate(q, body):
+    return gdpr_candidate(_number(q.get("key", [""])[0], "key"))
+
+
+@route("POST", "/api/gdpr/erase")
+def api_gdpr_erase(q, body):
+    key = _number(body.get("key"), "key")
+    running = JOBS.running("gdpr_erase")
+    return running or JOBS.start("gdpr_erase", run_gdpr_erase, key)
+
+
+@route("POST", "/api/gdpr/purge")
+def api_gdpr_purge(q, body):
+    snapshot_id = _number(body.get("snapshot_id"), "snapshot_id")
+    if snapshot_id is None:
+        raise ApiError("snapshot_id is required")
+    key = _number(body.get("key"), "key")
+    running = JOBS.running("gdpr_purge")
+    return running or JOBS.start("gdpr_purge", run_gdpr_purge, key, snapshot_id, bool(body.get("pause_workload", True)))
 
 
 class Handler(BaseHTTPRequestHandler):

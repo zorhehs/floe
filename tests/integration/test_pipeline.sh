@@ -48,6 +48,8 @@ for _ in $(seq 1 90); do
 done
 [[ "$state" == done ]] || fail "console live CDC trace: $(curl -fsS "$CONSOLE/api/jobs/$job")"
 wait_for "SELECT CAST(c_acctbal AS varchar) FROM lakehouse.shop.customer WHERE c_custkey=3" "1234.56" || fail "trace change not in lake"
+[[ "$(curl -fsS "$CONSOLE/api/alerts" | json 'len(d["rules"])')" == "5" ]] || fail "console does not list the 5 Prometheus alert rules"
+[[ "$(curl -fsS "$CONSOLE/api/gdpr/candidate" | json 'd["orders"] > 0')" == "True" ]] || fail "console GDPR candidate has no orders"
 
 echo "== schema evolution"
 $DC exec -T postgres psql -U app -d oltp -c "ALTER TABLE shop.customer ADD COLUMN IF NOT EXISTS it_col integer; UPDATE shop.customer SET it_col = 7 WHERE c_custkey = 2;"
