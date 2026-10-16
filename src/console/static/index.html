@@ -7,8 +7,8 @@
   <meta name="description" content="Operate and inspect the Floe CDC lakehouse: PostgreSQL → Debezium → Kafka → Spark → Iceberg → Trino.">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <script>(function () { try { var q = new URLSearchParams(location.search).get("theme"); var t = q || localStorage.getItem("floe-theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); document.documentElement.dataset.theme = t; } catch (e) { /* no storage */ } })();</script>
-  <link rel="stylesheet" href="/fonts.css?v=7">
-  <link rel="stylesheet" href="/app.css?v=7">
+  <link rel="stylesheet" href="/fonts.css?v=8">
+  <link rel="stylesheet" href="/app.css?v=8">
 </head>
 <body>
   <header class="header">
@@ -39,11 +39,11 @@
   <section class="hero">
     <div>
       <div class="eyebrow" id="page-eyebrow"></div>
-      <h1 id="page-title">Overview</h1>
+      <h1 id="page-title" tabindex="-1">Overview</h1>
       <p id="page-sub"></p>
     </div>
     <div class="spacer"></div>
-    <aside class="hero-card" id="hero-card" hidden aria-live="polite"></aside>
+    <aside class="hero-card" id="hero-card" hidden></aside>
     <div class="pills">
       <button class="pill" id="workload-pill" type="button" title="Synthetic OLTP workload - open its controls"></button>
       <a class="pill" id="health-pill" href="#/overview" title="Component health"></a>
@@ -66,6 +66,6 @@
   </footer>
 
   <div class="toast-host" id="toasts" role="status" aria-live="polite"></div>
-  <script src="/app.js?v=7"></script>
+  <script src="/app.js?v=8"></script>
 </body>
 </html>

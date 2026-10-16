@@ -6,6 +6,9 @@ inside the Airflow container) against the same REST catalog + MinIO warehouse
 the streaming job writes to. Commit conflicts with the streaming job are
 resolved by Iceberg optimistic concurrency + task retries.
 
+Airflow runs on SQLite with the SequentialExecutor (one task at a time), so a running
+maintenance task delays a purge or layout run triggered meanwhile.
+
 DAGs
   iceberg_maintenance         hourly housekeeping (active from the start: the
                               pipeline's heartbeat and metrics tables commit every
@@ -25,15 +28,10 @@ from airflow import DAG
 from airflow.models.param import Param
 from airflow.operators.bash import BashOperator
 
-# Heap + capped off-heap memory must fit next to Airflow itself (~0.7 GB) inside
-# the container limit; uncapped direct/metaspace memory got the job SIGKILLed.
-SPARK_SUBMIT = (
-    "spark-submit --master 'local[2]' --driver-memory 1200m "
-    "--conf spark.ui.enabled=false "
-    "--conf 'spark.driver.extraJavaOptions=-Daws.region=us-east-1 "
-    "-XX:MaxDirectMemorySize=256m -XX:MaxMetaspaceSize=256m' "
-    "/opt/jobs/maintenance.py"
-)
+# Spark sizing lives in /opt/jobs/maintenance.sh (shared with `make maintenance-now` and the
+# integration test): heap + capped off-heap memory must fit next to Airflow itself (~0.7 GB)
+# inside the container limit; uncapped direct/metaspace memory got the job SIGKILLed.
+MAINTENANCE = "/opt/jobs/maintenance.sh"
 REPORT_DIR = "/opt/results/maintenance"
 
 default_args = {
@@ -44,16 +42,20 @@ default_args = {
 
 
 def spark_task(task_id: str, args: str) -> BashOperator:
+    """One maintenance step. DAG params reach the job only through environment variables and
+    numeric arguments, never by interpolation into the shell command: `params.tables` is
+    free text from "Trigger DAG w/ config" and maintenance.py validates it."""
     out = f"{REPORT_DIR}/{{{{ dag.dag_id }}}}__{{{{ ts_nodash }}}}__{task_id}.json"
     return BashOperator(
         task_id=task_id,
-        bash_command=f"mkdir -p {REPORT_DIR} && {SPARK_SUBMIT} {args} --json-out {out}",
+        bash_command=f'mkdir -p {REPORT_DIR} && {MAINTENANCE} {args} --json-out {out}',
+        env={"TABLES": "{{ params.tables }}", "RETAIN_LAST": "{{ params.get('retain_last', 10) | int }}"},
+        append_env=True,  # keep PATH and the AWS/catalog variables of the container
         execution_timeout=timedelta(minutes=45),
     )
 
 
-TABLES = "{{ params.tables }}"
-TABLE_ARG = "{% if params.tables %}--tables " + TABLES + "{% endif %}"
+TABLE_ARG = '${TABLES:+--tables "$TABLES"}'
 
 
 with DAG(
@@ -69,7 +71,8 @@ with DAG(
         "tables": Param("", type="string", description="comma separated, empty = all"),
         "expire_older_than_minutes": Param(24 * 60, type="integer", minimum=0),
         "retain_last": Param(10, type="integer", minimum=1),
-        "orphan_older_than_minutes": Param(24 * 60, type="integer", minimum=24 * 60),
+        "orphan_older_than_minutes": Param(24 * 60, type="integer", minimum=24 * 60,
+                                           description="Iceberg enforces a minimum of 24 h"),
     },
     tags=["iceberg", "maintenance"],
 ) as maintenance:
@@ -78,11 +81,10 @@ with DAG(
                          f"{TABLE_ARG} --rewrite-deletes --rewrite-manifests")
     expire = spark_task("expire_snapshots",
                         f"{TABLE_ARG} --expire "
-                        "--expire-older-than-minutes {{ params.expire_older_than_minutes }} "
-                        "--retain-last {{ params.retain_last }}")
+                        "--expire-older-than-minutes {{ params.expire_older_than_minutes | int }}")
     orphans = spark_task("remove_orphan_files",
                          f"{TABLE_ARG} --orphans "
-                         "--orphan-older-than-minutes {{ params.orphan_older_than_minutes }}")
+                         "--orphan-older-than-minutes {{ params.orphan_older_than_minutes | int }}")
     compact >> rewrite >> expire >> orphans
 
 
@@ -108,11 +110,10 @@ with DAG(
                          f"{TABLE_ARG} --rewrite-deletes --rewrite-manifests")
     expire = spark_task("expire_snapshots",
                         f"{TABLE_ARG} --expire "
-                        "--expire-older-than-minutes {{ params.expire_older_than_minutes }} "
-                        "--retain-last {{ params.retain_last }}")
+                        "--expire-older-than-minutes {{ params.expire_older_than_minutes | int }}")
     orphans = spark_task("remove_orphan_files",
                          f"{TABLE_ARG} --orphans "
-                         "--orphan-older-than-minutes {{ params.orphan_older_than_minutes }}")
+                         "--orphan-older-than-minutes {{ params.orphan_older_than_minutes | int }}")
     apply_layout >> rewrite >> expire >> orphans
 
 
@@ -128,4 +129,4 @@ with DAG(
     params={"tables": Param("shop.customer,shop.orders", type="string")},
     tags=["iceberg", "gdpr"],
 ) as purge:
-    spark_task("purge", "--tables {{ params.tables }} --purge")
+    spark_task("purge", '--tables "$TABLES" --purge')

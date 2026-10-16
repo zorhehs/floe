@@ -18,6 +18,8 @@ import string
 import time
 from datetime import date, timedelta
 
+import psycopg
+
 from common.db import pg_connect
 
 PRIORITIES = ["1-URGENT", "2-HIGH", "3-MEDIUM", "4-NOT SPECIFIED", "5-LOW"]
@@ -62,7 +64,9 @@ class Workload:
     def insert_order(self, cur):
         cust = self._existing(cur, "customer", "c_custkey", self.min_cust, self.max_cust) or 1
         cur.execute(
-            "INSERT INTO shop.orders VALUES (nextval('shop.order_key_seq'), %s, 'O', %s, %s, %s, %s, 0, %s, localtimestamp) "
+            "INSERT INTO shop.orders (o_orderkey, o_custkey, o_orderstatus, o_totalprice, o_orderdate, o_orderpriority, "
+            "o_clerk, o_shippriority, o_comment, updated_at) "
+            "VALUES (nextval('shop.order_key_seq'), %s, 'O', %s, %s, %s, %s, 0, %s, localtimestamp) "
             "RETURNING o_orderkey",
             [cust, round(random.uniform(900, 500000), 2), FIRST_DATE + timedelta(days=random.randint(0, DAYS)),
              random.choice(PRIORITIES), f"Clerk#{random.randint(1, 1000):09d}", rand_text(40)])
@@ -89,7 +93,9 @@ class Workload:
 
     def insert_customer(self, cur):
         cur.execute(
-            "INSERT INTO shop.customer VALUES (nextval('shop.customer_key_seq'), %s, %s, %s, %s, %s, %s, %s, localtimestamp) "
+            "INSERT INTO shop.customer (c_custkey, c_name, c_address, c_nationkey, c_phone, c_acctbal, c_mktsegment, "
+            "c_comment, updated_at) "
+            "VALUES (nextval('shop.customer_key_seq'), %s, %s, %s, %s, %s, %s, %s, localtimestamp) "
             "RETURNING c_custkey",
             [f"Customer#{random.randint(1, 10**9):09d}", rand_text(30), random.randint(0, 24),
              f"{random.randint(10, 34)}-{random.randint(100, 999)}-{random.randint(100, 999)}-{random.randint(1000, 9999)}",
@@ -103,17 +109,25 @@ class Workload:
 
 
 def run_transaction(conn, wl: Workload, n: int, done: dict) -> None:
-    """Run n randomly chosen operations (weighted by MIX) as one transaction."""
+    """Run n randomly chosen operations (weighted by MIX) as one transaction.
+
+    Counts are added to `done` only after the commit, so a rolled-back tick is not reported."""
     ops, weights = zip(*MIX, strict=True)
+    batch: dict[str, int] = {}
     try:
         with conn.cursor() as cur:
             for op in random.choices(ops, weights, k=n):
                 getattr(wl, op)(cur)
-                done[op] = done.get(op, 0) + 1
+                batch[op] = batch.get(op, 0) + 1
         conn.commit()
     except Exception:
-        conn.rollback()
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001 - the connection itself may be gone
+            pass
         raise
+    for op, k in batch.items():
+        done[op] = done.get(op, 0) + k
 
 
 def main():
@@ -153,6 +167,13 @@ def main():
                 run_transaction(conn, wl, n, done)
             except Exception as exc:  # noqa: BLE001 - keep the workload alive
                 print(f"transaction rolled back: {exc}", flush=True)
+                if conn.closed or isinstance(exc, psycopg.OperationalError):
+                    try:  # PostgreSQL restarted: reconnect instead of failing every tick forever
+                        conn = pg_connect(autocommit=False)
+                        wl.conn = conn
+                    except Exception as reconnect_exc:  # noqa: BLE001
+                        print(f"reconnect failed: {reconnect_exc}", flush=True)
+                        time.sleep(5)
         if time.time() - last_report >= 10:
             elapsed = time.time() - started
             print(f"{elapsed:7.0f}s total={sum(done.values())} ({sum(done.values()) / elapsed:.1f} ops/s) {done}",

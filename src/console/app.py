@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import mimetypes
 import os
 import random
@@ -31,14 +32,16 @@ import socket
 import threading
 import time
 import uuid
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
+import psycopg
 import requests
 
 from common.db import LAKE, OLTP, QUERIES_DIR, REPORTS_DIR, Airflow, Trino, pg_connect
@@ -50,6 +53,7 @@ log = logging.getLogger("console")
 STATIC = Path(__file__).resolve().parent / "static"
 
 CONNECT_URL = os.getenv("CONNECT_URL", "http://connect:8083")
+KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "kafka:9092")
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://prometheus:9090")
 SPARK_UI_URL = os.getenv("SPARK_UI_URL", "http://spark-streaming:4040")
 ICEBERG_REST_URL = os.getenv("ICEBERG_REST_URL", "http://iceberg-rest:8181")
@@ -68,6 +72,14 @@ INTERNAL_TABLES = {"cdc_probe"}
 IDENT = re.compile(r"^[a-z_][a-z0-9_]{0,40}$")
 COLUMN_TYPES = {"integer", "bigint", "varchar(50)", "numeric(12,2)", "boolean", "date", "timestamp"}
 READ_ONLY_START = ("select", "with", "show", "describe", "explain", "values", "table")
+PRIORITIES = {"1-URGENT", "2-HIGH", "3-MEDIUM", "4-NOT SPECIFIED", "5-LOW"}
+WORKBENCH_MAX_SECONDS = 60
+# Static files are served by the Handler from any entry point (tests included): register the
+# types at import time so the platform mime database cannot change them.
+mimetypes.add_type("application/javascript", ".js")
+mimetypes.add_type("text/css", ".css")
+mimetypes.add_type("image/svg+xml", ".svg")
+mimetypes.add_type("font/ttf", ".ttf")
 
 
 class ApiError(Exception):
@@ -118,19 +130,28 @@ def ident(name: str, what: str = "identifier") -> str:
 # Small helpers: cache, background jobs
 # ---------------------------------------------------------------------------
 class TTLCache:
+    """Time-bounded memo with single-flight: concurrent misses on one key run `fn` once."""
+
     def __init__(self):
         self._data: dict[str, tuple[float, object]] = {}
         self._lock = threading.Lock()
+        self._inflight: dict[str, threading.Lock] = {}
 
     def get(self, key: str, ttl: float, fn):
         with self._lock:
             hit = self._data.get(key)
             if hit and time.time() - hit[0] < ttl:
                 return hit[1]
-        value = fn()
-        with self._lock:
-            self._data[key] = (time.time(), value)
-        return value
+            gate = self._inflight.setdefault(key, threading.Lock())
+        with gate:
+            with self._lock:  # another thread may have filled it while we waited
+                hit = self._data.get(key)
+                if hit and time.time() - hit[0] < ttl:
+                    return hit[1]
+            value = fn()
+            with self._lock:
+                self._data[key] = (time.time(), value)
+            return value
 
     def clear(self, prefix: str = ""):
         with self._lock:
@@ -149,17 +170,22 @@ class Jobs:
         self._lock = threading.Lock()
         self.keep = keep
 
+    MAX_LOG_LINES = 400
+
     def start(self, kind: str, fn, *args) -> dict:
         job_id = uuid.uuid4().hex[:12]
         job = {"id": job_id, "kind": kind, "state": "running", "log": [], "result": None,
                "error": None, "started_at": utcnow(), "finished_at": None}
         with self._lock:
             self._jobs[job_id] = job
-            for old in sorted(self._jobs.values(), key=lambda j: j["started_at"])[:-self.keep]:
+            finished = [j for j in sorted(self._jobs.values(), key=lambda j: j["started_at"]) if j["state"] != "running"]
+            for old in finished[:max(0, len(self._jobs) - self.keep)]:  # never evict a running job
                 self._jobs.pop(old["id"], None)
 
         def say(message: str):
             job["log"].append({"t": utcnow(), "msg": message})
+            if len(job["log"]) > self.MAX_LOG_LINES:  # a load job reports every 5 s for up to an hour
+                del job["log"][: len(job["log"]) - self.MAX_LOG_LINES]
 
         def run():
             try:
@@ -176,26 +202,54 @@ class Jobs:
         return job
 
     def get(self, job_id: str) -> dict:
-        job = self._jobs.get(job_id)
+        with self._lock:
+            job = self._jobs.get(job_id)
         if not job:
             raise ApiError("unknown job", HTTPStatus.NOT_FOUND)
         return job
 
     def running(self, kind: str) -> dict | None:
-        return next((j for j in self._jobs.values() if j["kind"] == kind and j["state"] == "running"), None)
+        with self._lock:
+            return next((j for j in self._jobs.values() if j["kind"] == kind and j["state"] == "running"), None)
 
 
 JOBS = Jobs()
 
 
+_TLS = threading.local()
+
+
+def trino() -> Trino:
+    """The calling thread's Trino session (one HTTP session per worker thread, not per query)."""
+    t = getattr(_TLS, "trino", None)
+    if t is None:
+        t = _TLS.trino = Trino()
+    return t
+
+
+def _trino_reset():
+    t = getattr(_TLS, "trino", None)
+    if t is not None:
+        t.close()
+    _TLS.trino = None
+
+
 def trino_rows(sql: str, params=None) -> list:
-    return Trino().rows(sql, params)
+    try:
+        return trino().rows(sql, params)
+    except Exception:
+        _trino_reset()
+        raise
 
 
 def trino_dicts(sql: str, params=None) -> list[dict]:
-    cur = Trino().conn.cursor()
-    cur.execute(sql, params)
-    rows = cur.fetchall()
+    try:
+        cur = trino().conn.cursor()
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+    except Exception:
+        _trino_reset()
+        raise
     cols = [d[0] for d in cur.description]
     return [dict(zip(cols, r, strict=True)) for r in rows]
 
@@ -214,21 +268,23 @@ def source_tables() -> list[str]:
 
 def user_table(name: str) -> str:
     ident(name, "table")
-    if name in INTERNAL_TABLES or name not in source_tables():
+    if name in INTERNAL_TABLES or name not in CACHE.get("source_tables", 5, source_tables):
         raise ApiError(f"unknown table: {name}", HTTPStatus.NOT_FOUND)
     return name
 
 
 def primary_key(table: str) -> str:
-    try:
-        rows = trino_rows(f'SELECT value FROM {LAKE}."{table}$properties" WHERE key = \'cdc.primary-key\'')
-        if rows and rows[0][0]:
-            return ident(rows[0][0].split(",")[0].strip(), "primary key")
-    except Exception:  # noqa: BLE001 - fall back to the known schema
-        pass
-    if table in PRIMARY_KEYS:
-        return PRIMARY_KEYS[table]
-    raise ApiError(f"no primary key known for {table}")
+    def lookup():
+        try:
+            rows = trino_rows(f'SELECT value FROM {LAKE}."{table}$properties" WHERE key = \'cdc.primary-key\'')
+            if rows and rows[0][0]:
+                return ident(rows[0][0].split(",")[0].strip(), "primary key")
+        except Exception:  # noqa: BLE001 - table not in the lake yet: fall back to the known schema
+            log.debug("primary key of %s not readable from Iceberg", table, exc_info=True)
+        if table in PRIMARY_KEYS:
+            return PRIMARY_KEYS[table]
+        raise ApiError(f"no primary key known for {table}")
+    return CACHE.get(f"pk:{table}", 60, lookup)
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +297,7 @@ def _get(url: str, **kw):
 
 
 def check_postgres():
-    with pg_connect() as conn, conn.cursor() as cur:
+    with pg_connect(connect_timeout=3) as conn, conn.cursor() as cur:
         cur.execute("SELECT count(*) FILTER (WHERE active), count(*) FROM pg_replication_slots")
         active, total = cur.fetchone()
         cur.execute("SELECT current_setting('server_version')")
@@ -260,7 +316,8 @@ def check_debezium():
 
 
 def check_kafka():
-    with socket.create_connection(("kafka", 9092), timeout=3):
+    host, _, port = KAFKA_BOOTSTRAP.partition(":")
+    with socket.create_connection((host, int(port or 9092)), timeout=3):
         pass
     topics = [t for t in _get(f"{CONNECT_URL}/connectors/{CONNECTOR}/topics").json()
               .get(CONNECTOR, {}).get("topics", []) if t.startswith("pg.")]
@@ -271,15 +328,8 @@ def check_spark():
     apps = _get(f"{SPARK_UI_URL}/api/v1/applications").json()
     if not apps:
         return False, "no application"
-    try:
-        age = trino_rows("SELECT date_diff('second', max(batch_finished_at), current_timestamp) "
-                         "FROM lakehouse.ops.ingest_batches")[0][0]
-    except Exception:  # noqa: BLE001
-        age = None
-    detail = "streaming job running"
-    if age is not None:
-        detail += f" · last batch {human_age(age)} ago"
-    return True, detail
+    # the batch age comes from the exporter via /api/metrics; a health check must not query Trino
+    return True, "streaming job running"
 
 
 def check_iceberg():
@@ -361,10 +411,24 @@ def component_status() -> dict:
 # ---------------------------------------------------------------------------
 # Metrics (Prometheus) and recent micro-batches
 # ---------------------------------------------------------------------------
+def finite(v) -> float | None:
+    """Prometheus serialises NaN/Inf as strings; JSON has no such values."""
+    f = float(v)
+    return f if math.isfinite(f) else None
+
+
 def prom_instant(expr: str):
     r = _get(f"{PROMETHEUS_URL}/api/v1/query", params={"query": expr}).json()
     res = r["data"]["result"]
-    return float(res[0]["value"][1]) if res else None
+    return finite(res[0]["value"][1]) if res else None
+
+
+def prom_instants(exprs: dict[str, str]) -> dict:
+    """Several plain gauges in one round trip: a `{__name__=~...}` selector keyed back by name."""
+    pattern = "|".join(re.escape(m) for m in exprs.values())
+    r = _get(f"{PROMETHEUS_URL}/api/v1/query", params={"query": f'{{__name__=~"{pattern}"}}'}).json()
+    by_name = {item["metric"].get("__name__"): finite(item["value"][1]) for item in r["data"]["result"]}
+    return {key: by_name.get(metric) for key, metric in exprs.items()}
 
 
 def prom_range(expr: str, minutes: int = 30, step: int = 15) -> list:
@@ -372,25 +436,28 @@ def prom_range(expr: str, minutes: int = 30, step: int = 15) -> list:
     r = _get(f"{PROMETHEUS_URL}/api/v1/query_range",
              params={"query": expr, "start": end - minutes * 60, "end": end, "step": step}).json()
     res = r["data"]["result"]
-    return [[float(t), float(v)] for t, v in res[0]["values"]] if res else []
+    return [[float(t), finite(v)] for t, v in res[0]["values"]] if res else []
 
 
 def metrics() -> dict:
+    """Six Prometheus calls: three ranges (whose last points are the headline values), one
+    multi-gauge instant query and two aggregating expressions."""
     out = {"error": None}
     try:
+        series = {
+            "freshness": prom_range("lakehouse_cdc_freshness_seconds"),
+            "ingest": prom_range("lakehouse_ingest_records_per_second"),
+            "slot_lag": prom_range("sum(lakehouse_replication_slot_lag_bytes)"),
+        }
+        last = lambda key: series[key][-1][1] if series[key] else None  # noqa: E731
+        gauges = prom_instants({"last_batch_age_s": "lakehouse_ingest_last_batch_age_seconds",
+                                "batches_5m": "lakehouse_ingest_batches_5m"})
         out.update(
-            freshness_s=prom_instant("lakehouse_cdc_freshness_seconds"),
-            ingest_rps=prom_instant("lakehouse_ingest_records_per_second"),
-            slot_lag_bytes=prom_instant("sum(lakehouse_replication_slot_lag_bytes)"),
-            last_batch_age_s=prom_instant("lakehouse_ingest_last_batch_age_seconds"),
-            batches_5m=prom_instant("lakehouse_ingest_batches_5m"),
+            freshness_s=last("freshness"), ingest_rps=last("ingest"), slot_lag_bytes=last("slot_lag"),
+            last_batch_age_s=gauges["last_batch_age_s"], batches_5m=gauges["batches_5m"],
             lake_rows=prom_instant('sum(lakehouse_iceberg_rows{table!="cdc_probe"})'),
-            source_tps=prom_instant("rate(lakehouse_source_commits_total[2m])"),
-            series={
-                "freshness": prom_range("lakehouse_cdc_freshness_seconds"),
-                "ingest": prom_range("lakehouse_ingest_records_per_second"),
-                "slot_lag": prom_range("sum(lakehouse_replication_slot_lag_bytes)"),
-            },
+            source_tps=prom_instant("rate(lakehouse_source_row_changes_total[2m])"),
+            series=series,
         )
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"Prometheus unavailable: {short_error(exc)}"
@@ -418,10 +485,13 @@ def alert_rules() -> dict:
 
 def recent_batches(limit: int = 25) -> list[dict]:
     limit = max(1, min(int(limit), 200))
+    # a micro-batch replayed after a crash appends its metrics rows twice: aggregate per batch and table
     return trino_dicts(f"""
-        SELECT batch_id, table_name, kafka_records, rows_merged, inserts, updates, deletes, merge_ms,
-               batch_finished_at, schema_changes
+        SELECT batch_id, table_name, max(kafka_records) AS kafka_records, max(rows_merged) AS rows_merged,
+               max(inserts) AS inserts, max(updates) AS updates, max(deletes) AS deletes, max(merge_ms) AS merge_ms,
+               max(batch_finished_at) AS batch_finished_at, max(schema_changes) AS schema_changes
         FROM lakehouse.ops.ingest_batches
+        GROUP BY batch_id, table_name
         ORDER BY batch_id DESC, table_name LIMIT {limit}""")
 
 
@@ -443,37 +513,45 @@ class WorkloadRunner:
         s["done"] = dict(self.state["done"])
         return s
 
-    def start(self, rate: float) -> dict:
-        rate = max(1.0, min(float(rate), self.MAX_RATE))
+    def start(self, rate) -> dict:
+        try:
+            rate = max(1.0, min(float(rate), self.MAX_RATE))
+        except (TypeError, ValueError):
+            raise ApiError("ops_per_sec must be a number") from None
         with self.lock:
             if self.thread and self.thread.is_alive():
-                self.state["ops_per_sec"] = rate  # change the rate of the running workload
-                return self.snapshot()
+                if not self.stop_flag.is_set():
+                    self.state["ops_per_sec"] = rate  # change the rate of the running workload
+                    return self.snapshot()
+                self.thread.join()  # a stop is in progress: let the old loop finish its transaction first
             conn = pg_connect(autocommit=False)
             try:
                 wl = Workload(conn)
             except SystemExit as exc:
                 conn.close()
                 raise ApiError(str(exc)) from None
-            self.stop_flag.clear()
+            self.stop_flag = threading.Event()  # one event per run: a late stop cannot cancel the next run
             self.state.update(running=True, ops_per_sec=rate, done={}, total=0, errors=0,
                               started_at=utcnow(), last_error=None, actual_ops_per_sec=0.0)
-            self.thread = threading.Thread(target=self._loop, args=(conn, wl), name="workload", daemon=True)
+            self.thread = threading.Thread(target=self._loop, args=(conn, wl, self.stop_flag),
+                                           name="workload", daemon=True)
             self.thread.start()
         return self.snapshot()
 
     def stop(self) -> dict:
-        self.stop_flag.set()
-        t = self.thread
-        if t:
-            t.join(timeout=5)
-        self.state["running"] = False
-        return self.snapshot()
+        with self.lock:
+            self.stop_flag.set()
+            t = self.thread
+            if t:
+                t.join(timeout=5)
+            self.state["running"] = False
+            return self.snapshot()
 
-    def _loop(self, conn, wl):
-        tick, carry, started = 0.1, 0.0, time.time()
+    def _loop(self, conn, wl, stop_flag: threading.Event):
+        tick, carry = 0.1, 0.0
+        window: deque[tuple[float, int]] = deque()  # (time, total) samples of the last 10 s
         try:
-            while not self.stop_flag.is_set():
+            while not stop_flag.is_set():
                 t0 = time.time()
                 carry += self.state["ops_per_sec"] * tick
                 n, carry = int(carry), carry - int(carry)
@@ -484,12 +562,20 @@ class WorkloadRunner:
                     except Exception as exc:  # noqa: BLE001 - keep the workload alive
                         self.state["errors"] += 1
                         self.state["last_error"] = short_error(exc)
-                        if conn.closed:
-                            conn = pg_connect(autocommit=False)
-                            wl.conn = conn
-                elapsed = time.time() - started
-                self.state["actual_ops_per_sec"] = round(self.state["total"] / elapsed, 1) if elapsed else 0
-                self.stop_flag.wait(max(0.0, tick - (time.time() - t0)))
+                        if conn.closed or isinstance(exc, psycopg.OperationalError):
+                            try:
+                                conn = pg_connect(autocommit=False)
+                                wl.conn = conn
+                            except Exception as reconnect_exc:  # noqa: BLE001
+                                self.state["last_error"] = f"reconnect failed: {short_error(reconnect_exc)}"
+                                stop_flag.wait(2)
+                now = time.time()
+                window.append((now, self.state["total"]))
+                while window and now - window[0][0] > 10:
+                    window.popleft()
+                span = now - window[0][0]
+                self.state["actual_ops_per_sec"] = round((self.state["total"] - window[0][1]) / span, 1) if span >= 1 else 0.0
+                stop_flag.wait(max(0.0, tick - (time.time() - t0)))
         finally:
             self.state["running"] = False
             try:
@@ -623,7 +709,7 @@ def run_trace(say, action: str, params: dict) -> dict:
         if batch:
             result["batch"] = clean_row(batch[0])
     except Exception:  # noqa: BLE001 - batch details are optional
-        pass
+        log.debug("batch details for the trace of %s %s unavailable", table, key, exc_info=True)
     return result
 
 
@@ -640,24 +726,32 @@ def table_overview() -> list[dict]:
             cur.execute(f"SELECT count(*) FROM shop.{table}")
             item = {"table": table, "source_rows": cur.fetchone()[0], "in_lake": table in lake}
             out.append(item)
-    t = Trino()
+    names = [item["table"] for item in out if item["in_lake"]]
+    if not names:
+        return out
+    # four round trips for all tables (UNION ALL) instead of four per table
+    files = {}
+    for name, content, n, b in trino_rows(" UNION ALL ".join(
+            f"SELECT '{name}', content, count(*), coalesce(sum(file_size_in_bytes), 0) "
+            f'FROM {LAKE}."{name}$files" GROUP BY content' for name in names)):
+        files[(name, content)] = (n, b)
+    rows = dict(trino_rows(" UNION ALL ".join(f"SELECT '{name}', count(*) FROM {LAKE}.{name}" for name in names)))
+    snaps = {name: (n, last) for name, n, last in trino_rows(" UNION ALL ".join(
+        f"SELECT '{name}', count(*), max(committed_at) FROM {LAKE}.\"{name}$snapshots\"" for name in names))}
+    parts = dict(trino_rows(" UNION ALL ".join(
+        f"SELECT '{name}', count(*) FROM {LAKE}.\"{name}$partitions\"" for name in names)))
     for item in out:
         if not item["in_lake"]:
             continue
         name = item["table"]
-        item["lake_rows"] = t.scalar(f"SELECT count(*) FROM {LAKE}.{name}")
-        files = {c: (n, b) for c, n, b in t.rows(
-            f'SELECT content, count(*), coalesce(sum(file_size_in_bytes), 0) FROM {LAKE}."{name}$files" '
-            "GROUP BY content")}
-        data_n, data_b = files.get(0, (0, 0))
-        item.update(data_files=data_n, data_bytes=data_b,
-                    delete_files=sum(files.get(c, (0, 0))[0] for c in (1, 2)),
-                    delete_bytes=sum(files.get(c, (0, 0))[1] for c in (1, 2)),
-                    avg_file_bytes=round(data_b / data_n) if data_n else 0)
-        snaps = t.rows(f'SELECT count(*), max(committed_at) FROM {LAKE}."{name}$snapshots"')[0]
-        item.update(snapshots=snaps[0], last_commit=to_json(snaps[1]) if snaps[1] else None)
-        part = t.rows(f'SELECT count(*) FROM {LAKE}."{name}$partitions"')[0][0]
-        item["partitions"] = part
+        data_n, data_b = files.get((name, 0), (0, 0))
+        n_snaps, last = snaps.get(name, (0, None))
+        item.update(lake_rows=rows.get(name, 0), data_files=data_n, data_bytes=data_b,
+                    delete_files=sum(files.get((name, c), (0, 0))[0] for c in (1, 2)),
+                    delete_bytes=sum(files.get((name, c), (0, 0))[1] for c in (1, 2)),
+                    avg_file_bytes=round(data_b / data_n) if data_n else 0,
+                    snapshots=n_snaps, last_commit=to_json(last) if last else None,
+                    partitions=parts.get(name, 0))
     return out
 
 
@@ -718,17 +812,18 @@ def table_schema(table: str) -> dict:
 def run_add_column(say, table: str, column: str, ctype: str, value) -> dict:
     pk = primary_key(table)
     with pg_connect(autocommit=False) as conn, conn.cursor() as cur:
-        cur.execute(f"ALTER TABLE shop.{table} ADD COLUMN IF NOT EXISTS {column} {ctype}")
+        # identifiers are validated by ident(); quoting also admits reserved words such as "order"
+        cur.execute(f'ALTER TABLE shop."{table}" ADD COLUMN IF NOT EXISTS "{column}" {ctype}')
         say(f"ALTER TABLE shop.{table} ADD COLUMN {column} {ctype}")
         # Debezium ships a table's schema with its next change event: change a few rows.
-        cur.execute(f"SELECT {pk} FROM shop.{table} ORDER BY {pk} LIMIT 5")
+        cur.execute(f'SELECT "{pk}" FROM shop."{table}" ORDER BY "{pk}" LIMIT 5')
         keys = [r[0] for r in cur.fetchall()]
         if not keys:
             raise ApiError(f"shop.{table} is empty - load data first")
         if value in (None, ""):
-            cur.execute(f"UPDATE shop.{table} SET {column} = {column} WHERE {pk} = ANY(%s)", [keys])
+            cur.execute(f'UPDATE shop."{table}" SET "{column}" = "{column}" WHERE "{pk}" = ANY(%s)', [keys])
         else:
-            cur.execute(f"UPDATE shop.{table} SET {column} = %s::{ctype} WHERE {pk} = ANY(%s)", [value, keys])
+            cur.execute(f'UPDATE shop."{table}" SET "{column}" = %s::{ctype} WHERE "{pk}" = ANY(%s)', [value, keys])
         conn.commit()
         say(f"updated {len(keys)} rows so the new schema travels with a change event")
     t0 = time.time()
@@ -738,13 +833,13 @@ def run_add_column(say, table: str, column: str, ctype: str, value) -> dict:
 def run_widen(say, table: str, column: str) -> dict:
     pk = primary_key(table)
     with pg_connect(autocommit=False) as conn, conn.cursor() as cur:
-        cur.execute(f"ALTER TABLE shop.{table} ALTER COLUMN {column} TYPE bigint")
+        cur.execute(f'ALTER TABLE shop."{table}" ALTER COLUMN "{column}" TYPE bigint')
         say(f"ALTER TABLE shop.{table} ALTER COLUMN {column} TYPE bigint")
-        cur.execute(f"SELECT {pk} FROM shop.{table} ORDER BY {pk} LIMIT 1")
+        cur.execute(f'SELECT "{pk}" FROM shop."{table}" ORDER BY "{pk}" LIMIT 1')
         key = cur.fetchone()
         if not key:
             raise ApiError(f"shop.{table} is empty - load data first")
-        cur.execute(f"UPDATE shop.{table} SET {column} = 3000000000 WHERE {pk} = %s", [key[0]])
+        cur.execute(f'UPDATE shop."{table}" SET "{column}" = 3000000000 WHERE "{pk}" = %s', [key[0]])
         conn.commit()
         say(f"set {column} = 3,000,000,000 (beyond the integer range) on {pk} = {key[0]}")
     return wait_schema(say, table, column, "bigint", time.time())
@@ -813,8 +908,9 @@ def row_history(table: str, key: int, depth: int = 12) -> dict:
 # SQL workbench
 # ---------------------------------------------------------------------------
 def strip_sql(sql: str) -> str:
-    sql = re.sub(r"--[^\n]*", "", sql)
-    sql = re.sub(r"/\*.*?\*/", "", sql, flags=re.S)
+    """Drop comments but never the inside of a string literal ('--' is a valid value)."""
+    sql = re.sub(r"'(?:[^']|'')*'|--[^\n]*|/\*.*?\*/",
+                 lambda m: m.group(0) if m.group(0).startswith("'") else " ", sql, flags=re.S)
     return sql.strip().rstrip(";").strip()
 
 
@@ -824,23 +920,34 @@ def run_sql(sql: str) -> dict:
         raise ApiError("empty query")
     if ";" in re.sub(r"'(?:[^']|'')*'", "", body):
         raise ApiError("one statement at a time")
-    if not body.lower().startswith(READ_ONLY_START):
+    lowered = body.lower()
+    if not lowered.startswith(READ_ONLY_START):
         raise ApiError("the workbench is read-only: SELECT, WITH, SHOW, DESCRIBE, EXPLAIN, VALUES or TABLE")
-    # The keyword check gives a friendly message; Trino enforces it: the "workbench"
-    # user is read-only on every catalog (config/trino/rules.json).
-    cur = Trino(WORKBENCH_USER).conn.cursor()
-    t0 = time.perf_counter()
-    cur.execute(body)
-    rows = cur.fetchmany(SQL_ROW_LIMIT + 1)
-    truncated = len(rows) > SQL_ROW_LIMIT
-    if truncated:
-        rows = rows[:SQL_ROW_LIMIT]
-        try:
-            cur.cancel()
-        except Exception:  # noqa: BLE001
-            pass
-    wall = (time.perf_counter() - t0) * 1000
-    stats = cur.stats or {}
+    analyzed = re.match(r"explain\s+analyze\s+(?:verbose\s+)?(\w+)", lowered)
+    if analyzed and analyzed.group(1) not in READ_ONLY_START:
+        raise ApiError("EXPLAIN ANALYZE executes the statement: only read-only statements are allowed")
+    # The keyword check only produces a friendly message. The guarantee is Trino's: the
+    # "workbench" user is read-only on every catalog through file-based access control
+    # (config/trino/access-control.properties + rules.json), so even a statement that slips past
+    # this filter cannot write. Queries are capped at WORKBENCH_MAX_SECONDS so an accidental
+    # cross join cannot occupy the coordinator (and this server thread) for minutes.
+    t = Trino(WORKBENCH_USER, {"query_max_execution_time": f"{WORKBENCH_MAX_SECONDS}s"})
+    try:
+        cur = t.conn.cursor()
+        t0 = time.perf_counter()
+        cur.execute(body)
+        rows = cur.fetchmany(SQL_ROW_LIMIT + 1)
+        truncated = len(rows) > SQL_ROW_LIMIT
+        if truncated:
+            rows = rows[:SQL_ROW_LIMIT]
+            try:
+                cur.cancel()
+            except Exception:  # noqa: BLE001
+                pass
+        wall = (time.perf_counter() - t0) * 1000
+        stats = cur.stats or {}
+    finally:
+        t.close()
     return {
         "columns": [{"name": d[0], "type": d[1]} for d in (cur.description or [])],
         "rows": [[clean(v) for v in r] for r in rows],
@@ -1099,8 +1206,18 @@ def run_gdpr_purge(say, key, snapshot_id: int, pause_workload: bool) -> dict:
     detail = None
     try:
         deadline = time.time() + 1800
+        failures = 0
         while time.time() < deadline:
-            detail = dag_run("iceberg_gdpr_purge", run_id)
+            try:
+                detail = dag_run("iceberg_gdpr_purge", run_id)
+            except Exception as exc:  # noqa: BLE001 - one slow Airflow response must not abort the purge
+                failures += 1
+                if failures > 5:
+                    raise
+                say(f"Airflow did not answer ({short_error(exc)}), retrying")
+                time.sleep(5)
+                continue
+            failures = 0
             for task in detail["tasks"]:
                 state = task.get("state")
                 if state and seen.get(task["task_id"]) != state:
@@ -1111,8 +1228,11 @@ def run_gdpr_purge(say, key, snapshot_id: int, pause_workload: bool) -> dict:
             time.sleep(3)
     finally:
         if resume_rate is not None:
-            WORKLOAD.start(resume_rate)
-            say("workload resumed")
+            try:
+                WORKLOAD.start(resume_rate)
+                say("workload resumed")
+            except Exception as exc:  # noqa: BLE001 - never mask the purge outcome
+                say(f"workload could not be resumed: {short_error(exc)}")
     state = detail["run"]["state"] if detail else "unknown"
     if state != "success":
         raise RuntimeError(f"purge run {run_id} ended in state {state} - see Airflow")
@@ -1148,31 +1268,37 @@ def api_ping(q, body):
     return {"ok": True, "time": utcnow()}
 
 
+def int_param(q: dict, name: str, default: int, lo: int, hi: int) -> int:
+    raw = q.get(name, [str(default)])[0]
+    if not str(raw).lstrip("-").isdigit():
+        raise ApiError(f"{name} must be an integer")
+    return max(lo, min(int(raw), hi))
+
+
+# Cache TTLs match the browser's polling intervals (one tab never misses, two tabs share).
 @route("GET", "/api/status")
 def api_status(q, body):
-    return CACHE.get("status", 4, component_status)
+    return CACHE.get("status", 5, component_status)
 
 
 @route("GET", "/api/metrics")
 def api_metrics(q, body):
-    return CACHE.get("metrics", 4, metrics)
+    return CACHE.get("metrics", 8, metrics)
 
 
 @route("GET", "/api/batches")
 def api_batches(q, body):
-    limit = int(q.get("limit", ["25"])[0])
-    return {"batches": [clean_row(r) for r in CACHE.get(f"batches:{limit}", 3, lambda: recent_batches(limit))]}
+    limit = int_param(q, "limit", 25, 1, 200)
+    return {"batches": [clean_row(r) for r in CACHE.get(f"batches:{limit}", 5, lambda: recent_batches(limit))]}
 
 
 @route("GET", "/api/overview")
 def api_overview(q, body):
-    def counts():
+    def has_data():
         with pg_connect() as conn, conn.cursor() as cur:
-            cur.execute("SELECT relname, n_live_tup FROM pg_stat_user_tables WHERE schemaname = 'shop'")
-            est = dict(cur.fetchall())
             cur.execute("SELECT EXISTS (SELECT 1 FROM shop.orders)")
-            return {"has_data": cur.fetchone()[0], "estimated_rows": est}
-    return CACHE.get("overview", 5, counts)
+            return {"has_data": cur.fetchone()[0]}
+    return CACHE.get("overview", 10, has_data)
 
 
 @route("GET", "/api/workload")
@@ -1198,12 +1324,15 @@ def api_trace(q, body):
     for f in ("key", "custkey"):
         if body.get(f) not in (None, "") and not str(body[f]).lstrip("-").isdigit():
             raise ApiError(f"{f} must be a number")
-    if body.get("balance") not in (None, ""):
-        try:
-            if abs(float(body["balance"])) >= 1e10:
-                raise ApiError("balance out of range")
-        except ValueError:
-            raise ApiError("balance must be a number") from None
+    for f in ("balance", "total_price"):
+        if body.get(f) not in (None, ""):
+            try:
+                if abs(float(body[f])) >= 1e10:
+                    raise ApiError(f"{f} out of range")
+            except (TypeError, ValueError):
+                raise ApiError(f"{f} must be a number") from None
+    if body.get("priority") not in (None, "") and body["priority"] not in PRIORITIES:
+        raise ApiError(f"priority must be one of {sorted(PRIORITIES)}")
     return JOBS.start("trace", run_trace, action, body)
 
 
@@ -1214,7 +1343,7 @@ def api_job(q, body, job_id):
 
 @route("GET", "/api/tables")
 def api_tables(q, body):
-    return {"tables": CACHE.get("tables", 5, table_overview)}
+    return {"tables": CACHE.get("tables", 10, table_overview)}
 
 
 @route("GET", "/api/tables/(?P<table>[a-z_0-9]+)/schema")
@@ -1260,7 +1389,7 @@ def api_snapshot(q, body, table, sid):
 @route("GET", "/api/tables/(?P<table>[a-z_0-9]+)/rows/(?P<key>-?[0-9]+)/history")
 def api_row_history(q, body, table, key):
     user_table(table)
-    return row_history(table, int(key), min(int(q.get("depth", ["12"])[0]), 30))
+    return row_history(table, int(key), int_param(q, "depth", 12, 1, 30))
 
 
 @route("GET", "/api/tables/(?P<table>[a-z_0-9]+)/sample-key")
@@ -1278,7 +1407,10 @@ def api_queries(q, body):
 
 @route("POST", "/api/sql")
 def api_sql(q, body):
-    return run_sql(body.get("sql", ""))
+    sql = body.get("sql", "")
+    if not isinstance(sql, str):
+        raise ApiError("sql must be a string")
+    return run_sql(sql)
 
 
 @route("GET", "/api/dags")
@@ -1292,7 +1424,7 @@ def api_trigger(q, body, dag_id):
     return trigger_dag(dag_id, body.get("conf") or {})
 
 
-@route("GET", "/api/dags/(?P<dag_id>[a-z_]+)/runs/(?P<run_id>[A-Za-z0-9_:.+-]+)")
+@route("GET", "/api/dags/(?P<dag_id>[a-z_]+)/runs/(?P<run_id>[^/]+)")
 def api_dag_run(q, body, dag_id, run_id):
     if dag_id not in DAGS:
         raise ApiError("unknown DAG", HTTPStatus.NOT_FOUND)
@@ -1378,17 +1510,44 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(payload)
 
     def _json(self, status: int, data):
-        self._send(status, json.dumps(data, default=to_json).encode(), "application/json; charset=utf-8",
-                   {"Cache-Control": "no-store"})
+        # allow_nan=False: a NaN would be invalid JSON that the browser silently rejects
+        self._send(status, json.dumps(data, default=to_json, allow_nan=False).encode(),
+                   "application/json; charset=utf-8", {"Cache-Control": "no-store"})
+
+    def _same_origin(self) -> bool:
+        """A write must come from the console's own page.
+
+        Browsers send POSTs with text/plain bodies cross-site without any preflight, so a page on
+        another site could otherwise start the workload or erase a customer while the console is
+        open. The SPA always sends application/json and a same-origin Sec-Fetch-Site/Origin."""
+        if not (self.headers.get("Content-Type") or "").lower().startswith("application/json"):
+            return False
+        site = self.headers.get("Sec-Fetch-Site")
+        if site and site not in ("same-origin", "none"):
+            return False
+        origin = self.headers.get("Origin")
+        host = self.headers.get("Host") or ""
+        if origin and urlparse(origin).netloc != host:
+            return False
+        return True
 
     def _dispatch(self, method: str):
         url = urlparse(self.path)
-        if not url.path.startswith("/api/"):
-            return self._static(url.path)
+        path = unquote(url.path)
+        if not path.startswith("/api/"):
+            return self._static(path)
         body = {}
         if method == "POST":
-            length = int(self.headers.get("Content-Length") or 0)
+            if not self._same_origin():
+                return self._json(HTTPStatus.FORBIDDEN,
+                                  {"error": "writes are accepted only from the console page (application/json, same origin)"})
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                self.close_connection = True
+                return self._json(HTTPStatus.BAD_REQUEST, {"error": "bad Content-Length"})
             if length > 1_000_000:
+                self.close_connection = True  # the body is left unread: do not reuse this connection
                 return self._json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": "request too large"})
             raw = self.rfile.read(length) if length else b""
             try:
@@ -1398,15 +1557,21 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 return self._json(HTTPStatus.BAD_REQUEST, {"error": "body must be a JSON object"})
         for m, pattern, fn in ROUTES:
-            match = pattern.match(url.path)
+            match = pattern.match(path)
             if match and m == method:
                 try:
                     return self._json(HTTPStatus.OK, fn(parse_qs(url.query), body, **match.groupdict()))
                 except ApiError as exc:
                     return self._json(exc.status, {"error": str(exc)})
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("%s %s failed: %s", method, url.path, short_error(exc))
+                except (requests.RequestException, psycopg.Error, OSError) as exc:
+                    log.warning("%s %s: backing service failed: %s", method, path, short_error(exc))
                     return self._json(HTTPStatus.BAD_GATEWAY, {"error": short_error(exc)})
+                except Exception as exc:  # noqa: BLE001 - a bug here, not a service outage
+                    if type(exc).__module__.startswith("trino"):
+                        log.warning("%s %s: Trino failed: %s", method, path, short_error(exc))
+                        return self._json(HTTPStatus.BAD_GATEWAY, {"error": short_error(exc)})
+                    log.exception("%s %s failed", method, path)
+                    return self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": short_error(exc)})
         self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
     def _static(self, path: str):
@@ -1436,10 +1601,6 @@ def main():
     p.add_argument("--port", type=int, default=int(os.getenv("CONSOLE_PORT", "8090")))
     args = p.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    mimetypes.add_type("application/javascript", ".js")
-    mimetypes.add_type("text/css", ".css")
-    mimetypes.add_type("image/svg+xml", ".svg")
-    mimetypes.add_type("font/ttf", ".ttf")
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.daemon_threads = True
     log.info("Floe console on http://localhost:%d", args.port)

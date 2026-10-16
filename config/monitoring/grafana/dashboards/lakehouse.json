@@ -1,12 +1,12 @@
 {
  "uid": "lakehouse-cdc",
- "title": "Floe · CDC pipeline",
- "description": "PostgreSQL → Debezium → Kafka → Spark → Iceberg on MinIO → Trino. Blue is the data path and healthy; red means attention. Red lines are the alert thresholds from config/monitoring/alerts.yml.",
+ "title": "Floe \u00b7 CDC pipeline",
+ "description": "PostgreSQL \u2192 Debezium \u2192 Kafka \u2192 Spark \u2192 Iceberg on MinIO \u2192 Trino. Blue is the data path and healthy; red means attention. Red lines are the alert thresholds from config/monitoring/alerts.yml.",
  "schemaVersion": 39,
  "version": 3,
  "editable": true,
  "graphTooltip": 1,
- "refresh": "10s",
+ "refresh": "15s",
  "time": {
   "from": "now-30m",
   "to": "now"
@@ -375,7 +375,7 @@
     {
      "refId": "A",
      "expr": "lakehouse_cdc_freshness_seconds",
-     "legendFormat": "PostgreSQL commit → visible in Iceberg"
+     "legendFormat": "PostgreSQL commit \u2192 visible in Iceberg"
     }
    ],
    "options": {
@@ -451,7 +451,7 @@
      {
       "matcher": {
        "id": "byName",
-       "options": "source commits/s"
+       "options": "source row changes/s"
       },
       "properties": [
        {
@@ -487,8 +487,8 @@
     },
     {
      "refId": "B",
-     "expr": "rate(lakehouse_source_commits_total[1m])",
-     "legendFormat": "source commits/s"
+     "expr": "rate(lakehouse_source_row_changes_total[1m])",
+     "legendFormat": "source row changes/s"
     }
    ],
    "options": {

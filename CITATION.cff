@@ -1,12 +1,15 @@
 cff-version: 1.2.0
 message: "If you use this work, please cite it as below."
-title: "Lakehouse Architecture with Apache Iceberg, Spark and Trino using CDC Ingestion"
+title: "Floe: a CDC lakehouse on Apache Iceberg, Spark and Trino"
+abstract: "Course project 'Lakehouse Architecture with Apache Iceberg, Spark and Trino using CDC Ingestion' (SE-315 Cloud Computing, Group 04)."
 type: software
 authors:
   - family-names: Zulfiqar
     given-names: Aliyan
   - family-names: Riaz
     given-names: Sehrosh
+repository-code: "https://github.com/zorhehs/floe"
 version: 1.0.0
+date-released: 2026-10-07
 license: MIT
 keywords: [lakehouse, apache-iceberg, apache-spark, trino, debezium, kafka, change-data-capture]

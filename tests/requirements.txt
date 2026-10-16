@@ -1,0 +1,5 @@
+# Host-side test dependencies (the containers get the same pins from config/docker).
+-r ../config/docker/requirements-tools.txt
+-c ../config/docker/constraints-airflow-2.10.5-py3.10.txt
+pyspark==3.5.6   # tests/unit/test_cdc_type_mapping.py; needs Java 17 on PATH
+pytest

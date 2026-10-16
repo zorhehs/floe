@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import time
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,7 +18,7 @@ LAKE = "lakehouse.shop"
 OLTP = "postgresql.shop"
 
 
-def pg_connect(autocommit: bool = True) -> psycopg.Connection:
+def pg_connect(autocommit: bool = True, connect_timeout: int = 10) -> psycopg.Connection:
     return psycopg.connect(
         host=os.getenv("POSTGRES_HOST", "postgres"),
         port=int(os.getenv("POSTGRES_PORT", "5432")),
@@ -27,25 +26,40 @@ def pg_connect(autocommit: bool = True) -> psycopg.Connection:
         user=os.getenv("APP_DB_USER", "app"),
         password=os.getenv("APP_DB_PASSWORD", "app"),
         autocommit=autocommit,
+        connect_timeout=connect_timeout,
     )
 
 
-def trino_connect(user: str = "lakehouse") -> trino.dbapi.Connection:
+def trino_connect(user: str = "lakehouse", session_properties: dict | None = None,
+                  request_timeout: int = 600) -> trino.dbapi.Connection:
     return trino.dbapi.connect(
         host=os.getenv("TRINO_HOST", "trino"),
         port=int(os.getenv("TRINO_PORT", "8080")),
         user=user,
         catalog="lakehouse",
         schema="shop",
-        request_timeout=600,
+        request_timeout=request_timeout,
+        session_properties=session_properties,
     )
 
 
 class Trino:
-    """Thin wrapper returning rows and Trino query statistics."""
+    """Thin wrapper returning rows and Trino query statistics (one HTTP session per instance)."""
 
-    def __init__(self, user: str = "lakehouse"):
-        self.conn = trino_connect(user)
+    def __init__(self, user: str = "lakehouse", session_properties: dict | None = None):
+        self.conn = trino_connect(user, session_properties)
+
+    def close(self):
+        try:
+            self.conn.close()
+        except Exception:  # noqa: BLE001 - closing is best effort
+            pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
 
     def query(self, sql: str, params=None):
         cur = self.conn.cursor()
@@ -75,12 +89,6 @@ def wait_for_trino(timeout: int = 300) -> Trino:
             last = exc
             time.sleep(3)
     raise RuntimeError(f"Trino not reachable: {last}")
-
-
-def lake_table_exists(t: Trino, table: str) -> bool:
-    return bool(t.scalar(
-        "SELECT count(*) FROM lakehouse.information_schema.tables "
-        "WHERE table_schema = 'shop' AND table_name = ?", [table]))
 
 
 class Airflow:
@@ -135,9 +143,3 @@ def save_json(path: Path, data) -> Path:
     path.write_text(json.dumps(data, indent=2, default=str))
     return path
 
-
-@contextmanager
-def stopwatch():
-    t = {"start": time.perf_counter()}
-    yield t
-    t["seconds"] = time.perf_counter() - t["start"]

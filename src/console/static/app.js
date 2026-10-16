@@ -197,8 +197,11 @@ function dataTable(columns, rows, opts = {}) {
     tbody.append(h("tr", {}, h("td", { colspan: columns.length, class: "empty", text: opts.empty || "No rows" })));
   }
   for (const row of rows) {
-    const tr = h("tr", { class: opts.onRow ? "click" : "" });
-    if (opts.onRow) tr.addEventListener("click", () => opts.onRow(row, tr));
+    const tr = h("tr", { class: opts.onRow ? "click" : "", tabindex: opts.onRow ? "0" : null, role: opts.onRow ? "button" : null });
+    if (opts.onRow) {
+      tr.addEventListener("click", () => opts.onRow(row, tr));
+      tr.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); opts.onRow(row, tr); } });
+    }
     if (opts.selected && opts.selected(row)) tr.classList.add("selected");
     for (const c of columns) {
       const v = c.render ? c.render(row) : row[c.key];
@@ -249,8 +252,8 @@ function lineChart(host, points, opts = {}) {
   const y = (v) => T + (1 - Math.min(v, yMax) / yMax) * (H - T - B);
   const f = opts.fmt || ((n, d = 0) => fmt.num(n, d));
   const svgEl = s("svg", { class: "chart", viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "img", "aria-label": opts.label || "chart" });
-  for (let i = 0; i <= 4; i++) {
-    const v = (yMax / 4) * i, yy = y(v);
+  for (let i = 0; i <= 5; i++) { // five steps: every niceMax value divides evenly by 5
+    const v = (yMax / 5) * i, yy = y(v);
     svgEl.append(s("line", { class: `grid-line ${i === 0 ? "base" : ""}`, x1: L, x2: W - R, y1: yy, y2: yy }));
     const digits = yMax < 1 ? 2 : yMax < 10 ? 1 : 0;
     svgEl.append(s("text", { class: "axis", x: L - 8, y: yy + 3.5, "text-anchor": "end" }, f(v, digits)));
@@ -271,7 +274,7 @@ function lineChart(host, points, opts = {}) {
       svgEl.append(s("line", { class: "threshold", x1: L, x2: W - R, y1: y(thr.value), y2: y(thr.value) }));
       svgEl.append(s("text", { class: "guide-label alert", x: L + 4, y: y(thr.value) - 4 }, thr.label || `alert ${f(thr.value)}`));
     } else {
-      svgEl.append(s("text", { class: "guide-label alert", x: L + 4, y: T + 2 }, `${thr.label || "alert"} - off scale`));
+      svgEl.append(s("text", { class: "guide-label alert", x: W - R, y: T + 2, "text-anchor": "end" }, `${thr.label || "alert"} - off scale`));
     }
   }
   svgEl.append(s("path", { class: "line", d, pathLength: 1 }));
@@ -504,14 +507,19 @@ function navigate() {
     else a.removeAttribute("aria-current");
   });
   const view = document.getElementById("view");
-  view.replaceChildren();
+  // each page renders into its own container: a render still awaiting its first fetch when the
+  // user navigates on lands in an orphaned node instead of under the next page
+  const page = h("div", { class: "page" });
+  view.replaceChildren(page);
   setHero(null);
   window.scrollTo(0, 0);
+  document.getElementById("page-title").focus({ preventScroll: true });
   // entrance motion only on the first paint of a page: later refreshes must not flicker
   view.classList.add("fresh");
   clearTimeout(navigate.freshTimer);
-  navigate.freshTimer = setTimeout(() => view.classList.remove("fresh"), 2600);
-  Promise.resolve(route.render(view, ctx, params)).catch((e) => view.append(errorBanner(e)));
+  navigate.freshTimer = setTimeout(() => view.classList.remove("fresh"), 1300);
+  const mine = ctx;
+  Promise.resolve(route.render(page, ctx, params)).catch((e) => { if (mine.alive) page.append(errorBanner(e)); });
 }
 
 function makeContext() {
@@ -521,6 +529,7 @@ function makeContext() {
   const c = {
     alive: true,
     every(ms, fn) {
+      if (!c.alive) return; // a view that registers after navigation must not leak a timer
       let running = false;
       const tick = async (force) => {
         // background tabs skip polling; the first load and a return to the tab always run
@@ -555,6 +564,7 @@ async function refreshTopbar() {
     const [status, wl] = await Promise.all([api("/api/status"), api("/api/workload")]);
     globalState.status = status;
     globalState.workload = wl;
+    document.dispatchEvent(new CustomEvent("floe:status", { detail: status }));
     const hp = document.getElementById("health-pill");
     const allOk = status.healthy === status.total;
     hp.replaceChildren(dot(allOk ? "ok" : status.healthy >= status.total - 2 ? "warn" : "bad", true),
@@ -599,22 +609,32 @@ function meter(fraction) {
 
 // ------------------------------------------------------------------ hero insight (top layout)
 let heroTimer = null;
+let heroItems = null;
+let heroKey = "";
+const heroText = (it) => it.text.map((x) => (x instanceof Node ? x.textContent : String(x))).join("");
 function setHero(items) {
   const host = document.getElementById("hero-card");
-  clearInterval(heroTimer);
-  if (!items || !items.length) { host.replaceChildren(); host.hidden = true; return; }
+  if (!items || !items.length) { clearInterval(heroTimer); heroItems = null; heroKey = ""; host.replaceChildren(); host.hidden = true; return; }
+  const key = items.map(heroText).join("|");
+  if (key === heroKey) { heroItems = items; return; } // same sentences: keep the rotation and the DOM as they are
+  const first = heroKey === "";
+  heroKey = key;
+  heroItems = items;
   host.hidden = false;
   let i = Number(host.dataset.index || 0) % items.length;
   const render = () => {
-    const it = items[i];
+    const it = heroItems[i % heroItems.length];
     host.replaceChildren(
       h("div", { class: "hero-head" }, icon("live", 15), h("span", { text: it.title }), h("a", { href: it.href, class: "hero-go", "aria-label": "Open" }, icon("external", 14))),
-      h("p", { class: `hero-text ${it.text.map((x) => (x instanceof Node ? x.textContent : String(x))).join("").length > 95 ? "long" : ""}` }, ...it.text),
-      h("div", { class: "hero-dots" }, items.map((_, j) => h("i", { class: j === i ? "on" : "" }))));
+      h("p", { class: `hero-text ${heroText(it).length > 95 ? "long" : ""}` }, ...it.text),
+      h("div", { class: "hero-dots" }, heroItems.map((_, j) => h("i", { class: j === i % heroItems.length ? "on" : "" }))));
     host.dataset.index = String(i);
   };
   render();
-  heroTimer = setInterval(() => { i = (i + 1) % items.length; render(); }, 6000);
+  if (first || !heroTimer) {
+    clearInterval(heroTimer);
+    heroTimer = setInterval(() => { if (!heroItems) return; i = (i + 1) % heroItems.length; render(); }, 6000);
+  }
 }
 
 async function viewOverview(view, ctx) {
@@ -649,24 +669,30 @@ async function viewOverview(view, ctx) {
 
   let metrics = null;
   const lastKpiText = {};
-  ctx.every(5000, async () => {
-    const status = await api("/api/status");
-    globalState.status = status;
+  function renderStatus(status) {
+    if (!status) return;
     const by = Object.fromEntries(status.components.map((c) => [c.id, c]));
     flow.replaceChildren(...MAIN_FLOW.map((id) => nodeEl(by[id])));
     services.replaceChildren(...SIDE.map((id) => nodeEl(by[id])));
     checked.textContent = `checked ${fmt.time(status.checked_at)}`;
     const live = (metrics && metrics.ingest_rps > 0.5) || (globalState.workload && globalState.workload.running);
     flow.classList.toggle("live", Boolean(live));
-  });
+  }
+  // the top bar is the only /api/status poller; views listen for its result
+  renderStatus(globalState.status);
+  ctx.on(document, "floe:status", (ev) => renderStatus(ev.detail));
 
+  let lastHasData = null;
   ctx.every(10000, async () => {
     const ov = await api("/api/overview");
+    if (ov.has_data === lastHasData) return; // rebuilding would destroy a load job's live log
+    lastHasData = ov.has_data;
     banner.replaceChildren();
     if (!ov.has_data) banner.append(loadBanner(ctx));
   });
 
-  ctx.every(5000, async () => {
+  let lastSample = null;
+  ctx.every(10000, async () => {
     metrics = await api("/api/metrics");
     if (metrics.error) {
       kpis.replaceChildren(h("div", { class: "banner bad", style: "grid-column:1/-1" },
@@ -679,16 +705,15 @@ async function viewOverview(view, ctx) {
     const lagKind = metrics.slot_lag_bytes === null ? "" : metrics.slot_lag_bytes < 64 * 1024 * 1024 ? "ok" : "warn";
     kpis.replaceChildren(
       kpi("Freshness", f === null ? "—" : f >= 120 ? fmt.secs(f) : fmt.num(f, 1), f === null || f >= 120 ? null : "s",
-        f >= 120 ? "last heartbeat merged into Iceberg this long ago" : "PostgreSQL commit → queryable in Trino", fKind, f === null ? null : f / 60,
+        f >= 120 ? "last heartbeat merged into Iceberg this long ago" : "PostgreSQL commit → queryable in Trino", fKind, null,
         { series: metrics.series.freshness, good: "down", fmt: (v) => fmt.secs(v), eps: 0.5 }),
-      kpi("Ingest rate", fmt.num(metrics.ingest_rps || 0, 1), "rec/s", `${fmt.int(metrics.batches_5m)} micro-batches in 5 min`,
-        null, (metrics.ingest_rps || 0) / Math.max(1, ...metrics.series.ingest.map((p) => p[1])),
+      kpi("Ingest rate", fmt.num(metrics.ingest_rps || 0, 1), "rec/s", `${fmt.int(metrics.batches_5m)} micro-batches in 5 min`, null, null,
         { series: metrics.series.ingest, good: "up", fmt: (v) => `${fmt.num(v, 1)} rec/s`, eps: 0.2 }),
-      kpi("Replication lag", lagNum, lagUnit || null, "WAL not yet confirmed by Debezium", lagKind, (metrics.slot_lag_bytes || 0) / (64 * 1024 * 1024),
+      kpi("Replication lag", lagNum, lagUnit || null, "WAL not yet confirmed by Debezium", lagKind, null,
         { series: metrics.series.slot_lag, good: "down", fmt: (v) => fmt.bytes(v), eps: 4096 }),
       kpi("Last micro-batch", metrics.last_batch_age_s === null ? "—" : fmt.num(metrics.last_batch_age_s, 0), "s ago", "Spark trigger every 10 s",
         null, metrics.last_batch_age_s === null ? null : metrics.last_batch_age_s / 30),
-      kpi("Rows in lakehouse", fmt.int(metrics.lake_rows), null, `source ${fmt.num(metrics.source_tps || 0, 1)} commits/s`));
+      kpi("Rows in lakehouse", fmt.int(metrics.lake_rows), null, `source ${fmt.num(metrics.source_tps || 0, 1)} row changes/s`));
     kpis.querySelectorAll(".kpi-value").forEach((el, i) => {
       const text = el.textContent;
       if (lastKpiText[i] !== undefined && lastKpiText[i] !== text) el.classList.add("tick");
@@ -701,7 +726,8 @@ async function viewOverview(view, ctx) {
       { title: "Throughput", href: "#/overview", text: ["The streaming job merged ", h("b", { text: `${fmt.int(metrics.batches_5m)} micro-batches` }), " in the last five minutes, ", h("b", { text: `${fmt.num(metrics.ingest_rps || 0, 1)} records/s` })] },
       { title: "Lakehouse", href: "#/tables", text: [h("b", { text: `${fmt.int(metrics.lake_rows)} rows` }), " live in Apache Iceberg, every change kept as a ", h("b", { text: "queryable snapshot" })] },
     ]);
-    drawCharts();
+    const sample = metrics.series.freshness.length ? metrics.series.freshness[metrics.series.freshness.length - 1][0] : null;
+    if (sample !== lastSample) { lastSample = sample; drawCharts(); } // the series step is 15 s: redraw only on a new sample
   });
 
   async function loadBatches() {
@@ -744,7 +770,8 @@ async function viewOverview(view, ctx) {
       threshold: { value: 120, label: "alert · 2 min behind" } });
     lineChart(chartI, metrics.series.ingest, { fmt: (v, d = 0) => `${fmt.num(v, d)}`, label: "Ingest rate" });
   }
-  ctx.on(window, "resize", drawCharts);
+  let resizeFrame = null;
+  ctx.on(window, "resize", () => { cancelAnimationFrame(resizeFrame); resizeFrame = requestAnimationFrame(drawCharts); });
 }
 
 function loadBanner(ctx) {
@@ -900,6 +927,7 @@ async function viewLive(view, ctx) {
         const done = await followJob(job, (j) => renderTrace(j), ctx);
         if (done.state === "done") {
           traceHistory.unshift(done.result);
+          traceHistory.splice(50);
           renderHistory();
         } else if (done.state === "failed") toast(done.error, "bad");
       } finally { clearInterval(tick); }
@@ -939,6 +967,7 @@ async function viewLive(view, ctx) {
           batch ? `micro-batch #${batch.batch_id} · ${fmt.int(batch.kafka_records)} change events · MERGE ${fmt.ms(batch.merge_ms)}` : "merged by the streaming job",
           batch ? rel(batch.batch_finished_at) : cdc._ingested_at ? rel(cdc._ingested_at) : ""),
         step("done", "Visible in Trino", `lakehouse.shop.${r.table} · ${r.polls} polls`, `+${r.latency_s.toFixed(2)} s`)),
+      r.note ? h("div", { class: "banner" }, h("div", {}, h("h3", { text: "Measured with a caveat" }), h("p", { text: r.note }))) : null,
       rowCompare(r));
   }
 
@@ -986,12 +1015,18 @@ async function viewTables(view, ctx, params) {
   const detail = h("div");
   view.append(cards, detail);
 
+  let lastTables = [];
   async function loadCards() {
     const { tables } = await api("/api/tables");
+    lastTables = tables;
     if (!selected && tables.length) selected = (tables.find((t) => t.table === "orders") || tables[0]).table;
+    if (cards.contains(document.activeElement) && document.activeElement !== cards) return; // keep keyboard focus
+    renderCards(tables);
+  }
+  function renderCards(tables) {
     cards.replaceChildren(...tables.map((t) => {
       const match = t.in_lake && t.source_rows === t.lake_rows;
-      return h("button", { class: "tcard", type: "button", "aria-pressed": String(t.table === selected), onclick: () => { selected = t.table; loadCards(); loadDetail(); } },
+      return h("button", { class: "tcard", type: "button", "aria-pressed": String(t.table === selected), onclick: () => { selected = t.table; renderCards(lastTables); loadDetail(); } },
         h("div", { class: "tcard-name" }, t.table, h("code", { text: "shop" }),
           h("span", { style: "margin-left:auto" }, t.in_lake ? chip(match ? "in sync" : "catching up", match ? "ok" : "warn") : chip("not in lake", "warn"))),
         h("div", { class: "stats" },
@@ -1088,10 +1123,15 @@ async function viewTimeTravel(view, ctx, params) {
   const rowHost = h("div");
 
   const isSelected = (r) => selectedSnap && r.snapshot_id === selectedSnap.snapshot_id;
-  function select(r) { selectedSnap = r; loadSnaps(); showSnapshot(r); }
+  let lastSnaps = null;
+  function select(r) { selectedSnap = r; if (lastSnaps) renderSnaps(lastSnaps); showSnapshot(r); }
 
   async function loadSnaps() {
     const data = await api(`/api/tables/${table}/snapshots`);
+    lastSnaps = data;
+    renderSnaps(data);
+  }
+  function renderSnaps(data) {
     snapshotChart(chartHost, data.snapshots, { selected: isSelected, onSelect: select });
     snapsHost.replaceChildren(chartHost, dataTable([
       { label: "Committed", render: (r) => fmt.datetime(r.committed_at) },
@@ -1194,7 +1234,7 @@ async function viewSql(view, ctx) {
   const list = h("div", { class: "qlist" });
   let last = null;
 
-  function setSql(sql) { editor.value = sql.trim(); sessionStorage.setItem("floe.sql", editor.value); editor.focus(); }
+  function setSql(sql) { editor.value = sql.trim(); sessionStorage.setItem("floe.sql", editor.value); editor.focus({ preventScroll: true }); }
 
   list.append(h("div", { class: "group", text: "Benchmark suite" }));
   try {
@@ -1238,8 +1278,10 @@ async function viewSql(view, ctx) {
     if (!last) return;
     const esc = (v) => (v === null || v === undefined ? "" : /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
     const text = [last.columns.map((c) => esc(c.name)).join(","), ...last.rows.map((r) => r.map(esc).join(","))].join("\n");
-    const a = h("a", { href: URL.createObjectURL(new Blob([text], { type: "text/csv" })), download: "floe-query.csv" });
+    const url = URL.createObjectURL(new Blob([text], { type: "text/csv" }));
+    const a = h("a", { href: url, download: "floe-query.csv" });
     document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
   editor.addEventListener("keydown", (e) => {
@@ -1253,7 +1295,7 @@ async function viewSql(view, ctx) {
       card("Query", "read-only · max 1,000 rows · default catalog lakehouse.shop", h("div", { class: "stack" }, editor,
         h("div", { class: "row" }, runBtn, csvBtn, h("span", { class: "muted", style: "font-size:12px" }, h("kbd", { text: "⌘/Ctrl" }), " ", h("kbd", { text: "Enter" }), " runs the query")))),
       card("Result", null, out))));
-  editor.focus();
+  editor.focus({ preventScroll: true });
 }
 
 // ------------------------------------------------------------------ Maintenance
@@ -1273,8 +1315,9 @@ async function viewMaintenance(view, ctx) {
   view.append(dagsHost, runHost, card("File layout now", "small files and delete files are what maintenance removes", filesHost,
     button("Refresh", () => loadFiles(), { small: true, icon: "refresh", kind: "ghost" })));
 
-  async function loadDags() {
+  async function loadDags(force) {
     const { dags } = await api("/api/dags");
+    if (!force && (dagsHost.querySelector(".btn .spinner") || (dagsHost.contains(document.activeElement) && document.activeElement !== dagsHost))) return;
     dagsHost.replaceChildren(...dags.map((d) => {
       const meta = DAG_TEXT[d.dag_id] || { title: d.dag_id, text: d.description, tables: "" };
       if (!(d.dag_id in tableInputs)) tableInputs[d.dag_id] = h("input", { class: "input", value: meta.tables, placeholder: "all tables", "aria-label": "Tables" });
@@ -1284,14 +1327,14 @@ async function viewMaintenance(view, ctx) {
             const r = await api(`/api/dags/${d.dag_id}/runs`, { body: { conf: { tables: tableInputs[d.dag_id].value } } });
             toast(`Triggered ${d.dag_id}`, "ok");
             selected = { dag: d.dag_id, run: r.dag_run_id };
-            await loadDags();
+            await loadDags(true);
             loadRun();
           } catch (e) { toast(e.message, "bad"); }
         });
       }, { kind: "primary", icon: "play" });
       const scheduleBtn = d.schedule ? button(d.is_paused ? "Enable hourly" : "Pause hourly", async (ev) => {
         await busy(ev.currentTarget, async () => {
-          try { await api(`/api/dags/${d.dag_id}/paused`, { body: { paused: !d.is_paused } }); await loadDags(); } catch (e) { toast(e.message, "bad"); }
+          try { await api(`/api/dags/${d.dag_id}/paused`, { body: { paused: !d.is_paused } }); await loadDags(true); } catch (e) { toast(e.message, "bad"); }
         });
       }, { small: true }) : null;
       return h("section", { class: "card dag" },
@@ -1305,7 +1348,7 @@ async function viewMaintenance(view, ctx) {
         d.schedule ? h("small", { class: "muted", text: "Airflow only runs unpaused DAGs: Run now enables the hourly schedule." }) : null,
         h("div", { class: "runs" }, d.runs.length ? d.runs.map((r) => h("button", { type: "button", class: "run",
           "aria-pressed": String(selected && selected.run === r.dag_run_id),
-          onclick: () => { selected = { dag: d.dag_id, run: r.dag_run_id }; loadDags(); loadRun(); } },
+          onclick: () => { selected = { dag: d.dag_id, run: r.dag_run_id }; loadDags(true); loadRun(); } },
           stateChip(r.state), h("code", { text: r.dag_run_id }), h("span", { class: "muted", text: fmt.ago(r.start_date) })))
           : h("p", { class: "muted", style: "margin:0;font-size:12.5px", text: "No runs yet" })));
     }));
@@ -1326,7 +1369,7 @@ async function viewMaintenance(view, ctx) {
           stateChip(t.state))) : h("p", { class: "muted", text: "Waiting for the scheduler…" })),
         h("div", { class: "row" }, running ? h("span", { class: "spinner" }) : null, stateChip(d.run.state),
           h("a", { class: "btn small ghost", href: `http://localhost:8088/dags/${selected.dag}/grid`, target: "_blank", rel: "noopener" }, icon("external"), "Airflow"))));
-      if (!running && selected.wasRunning) { toast(`${selected.dag} finished: ${d.run.state}`, d.run.state === "success" ? "ok" : "bad"); loadFiles(); loadDags(); }
+      if (!running && selected.wasRunning) { toast(`${selected.dag} finished: ${d.run.state}`, d.run.state === "success" ? "ok" : "bad"); loadFiles(); loadDags(true); }
       selected.wasRunning = running;
     } catch (e) { runHost.replaceChildren(errorBanner(e)); }
   }
@@ -1346,7 +1389,7 @@ async function viewMaintenance(view, ctx) {
     } catch (e) { filesHost.replaceChildren(errorBanner(e)); }
   }
 
-  ctx.every(8000, loadDags);
+  ctx.every(8000, () => loadDags(false));
   ctx.every(3000, loadRun);
   loadFiles();
 }
@@ -1570,7 +1613,7 @@ async function viewResults(view) {
       kpi("Objects in MinIO", objB ? `−${Math.round((1 - objA / objB) * 100)}` : "—", objB ? "%" : null, `${fmt.int(objB)} → ${fmt.int(objA)} objects, bytes unchanged`)),
     h("div", { class: "split-r" },
       card("Query latency before and after optimisation", "median wall time", h("div", { class: "stack" },
-        h("div", { class: "legend" }, h("span", {}, h("i", { style: "background:var(--line-2)" }), "before"), h("span", {}, h("i", { style: "background:var(--accent-strong)" }), "after layout optimisation")),
+        h("div", { class: "legend-row" }, h("span", {}, h("i", { style: "background:var(--line-2)" }), "before"), h("span", {}, h("i", { style: "background:var(--accent-strong)" }), "after layout optimisation")),
         bars,
         h("p", { class: "muted", style: "margin:0;font-size:12.5px", text: "Q06 scans the whole table either way, so sorting and partitioning cannot help it." }))),
       card("Optimisation run", `${fmt.secs(b.optimization.wall_seconds)} wall, Airflow DAG`, dataTable([

@@ -12,24 +12,34 @@ on:
         type: boolean
         default: true
 
+env:
+  PYTHON_VERSION: "3.10"
+
 jobs:
   lint-and-unit-tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: {python-version: "3.10"}
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            tests/requirements.txt
+            config/docker/requirements-tools.txt
+            config/docker/constraints-airflow-2.10.5-py3.10.txt
       - uses: actions/setup-java@v4
         with: {distribution: temurin, java-version: "17"}
-      - name: Install dependencies
-        run: |
-          pip install pyspark==3.5.6 pytest ruff -r config/docker/requirements-tools.txt
+      - name: Install dependencies (same pins as the images)
+        run: pip install ruff -r tests/requirements.txt
       - name: Lint (ruff)
-        run: ruff check src tests
+        run: ruff check src tests docs/report/latex
       - name: Compile all Python
-        run: python -m compileall -q src tests
+        run: python -m compileall -q src tests docs/report/latex
       - name: Shell syntax
-        run: for f in scripts/*.sh scripts/demos/*.sh tests/integration/*.sh config/postgres/init/*.sh; do bash -n "$f"; done
+        run: |
+          for f in scripts/*.sh scripts/demos/*.sh tests/integration/*.sh config/postgres/init/*.sh config/docker/*.sh; do bash -n "$f"; done
+          sh -n config/debezium/register.sh
       - name: Unit tests
         run: pytest -q tests/unit
       - name: Validate docker-compose.yml
@@ -41,20 +51,54 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: cp .env.example .env
+      - name: Cache the pinned Spark jars
+        uses: actions/cache@v4
+        with:
+          path: |
+            config/docker/jars
+            config/docker/catalog-jars
+          key: jars-${{ hashFiles('scripts/fetch-jars.sh') }}
       - run: ./scripts/fetch-jars.sh
-      - name: Build spark / tools / airflow images
-        run: docker compose --profile tools build
+      - uses: docker/setup-buildx-action@v3
+      - name: Build spark / tools / airflow images (layer cache in GitHub Actions)
+        uses: docker/bake-action@v5
+        with:
+          files: docker-compose.yml
+          targets: spark-streaming,tools,airflow
+          load: true
+          set: |
+            *.cache-from=type=gha
+            *.cache-to=type=gha,mode=max
+      - name: Smoke test the tools image
+        run: docker compose --profile tools run --rm --no-deps tools python3 -c "import consumers.bench, console.app, producer.generator; print('tools image ok')"
 
   integration:
-    if: github.event_name == 'workflow_dispatch' && inputs.integration || startsWith(github.ref, 'refs/tags/v')
+    # The full stack needs ~11 GB of memory caps (steady state ~6 GB) and ~15 minutes, so it
+    # runs on pushes to main, on release tags and on request, not on every pull request.
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.integration)
     runs-on: ubuntu-latest
     needs: build-images
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - run: cp .env.example .env && echo "TPCH_SCALE=tiny" >> .env
+      - run: cp .env.example .env && echo "TPCH_SCALE=tiny" >> .env && chmod -R a+rwX results
+      - name: Cache the pinned Spark jars
+        uses: actions/cache@v4
+        with:
+          path: |
+            config/docker/jars
+            config/docker/catalog-jars
+          key: jars-${{ hashFiles('scripts/fetch-jars.sh') }}
       - run: ./scripts/fetch-jars.sh
-      - run: docker compose --profile tools build
+      - uses: docker/setup-buildx-action@v3
+      - name: Build images from the shared layer cache
+        uses: docker/bake-action@v5
+        with:
+          files: docker-compose.yml
+          targets: spark-streaming,tools,airflow
+          load: true
+          set: |
+            *.cache-from=type=gha
       - name: Full pipeline integration test
         run: ./tests/integration/test_pipeline.sh
       - name: Logs on failure

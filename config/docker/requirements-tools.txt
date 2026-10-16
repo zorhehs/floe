@@ -1,8 +1,9 @@
 # Installed with --constraint constraints-airflow-2.10.5-py3.10.txt (see Dockerfile):
-# packages also used by Airflow get exactly Airflow's pinned versions.
+# packages also used by Airflow get exactly Airflow's pinned versions (trino, requests,
+# boto3 are in that file). The rest are pinned here so image builds are reproducible.
 trino
 requests
 boto3
-prometheus-client
-psycopg[binary]>=3.2,<3.3
-matplotlib>=3.8,<3.10
+prometheus-client==0.21.1
+psycopg[binary]==3.2.13
+matplotlib==3.9.4
