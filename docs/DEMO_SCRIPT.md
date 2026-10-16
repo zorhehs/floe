@@ -1,17 +1,19 @@
 # Demo video script (target 7 minutes)
 
-Prepare beforehand: `make up && make load`, start `make workload-start` ~2 minutes before
-recording, and run `make bench` once so a report exists. Use a large terminal font. Open
-browser tabs for Airflow, MinIO, Spark UI and the latest `reports/benchmark-*/summary.md`.
+Before recording:
+1. Run `make up && make load`, then open the **Floe Console** at http://localhost:8090.
+2. Start the workload about 2 minutes before recording, so the charts have data: on the Overview page click **Start** at 100 ops/s.
+3. Run `make bench` once, so the Benchmark page has results.
+4. Use full-screen browser zoom at 100 %. Keep one terminal ready for the `make` fallbacks.
 
 | Time | Show | Say (key points) |
 |---|---|---|
-| 0:00–0:40 | README architecture diagram | Problem: analytics on live OLTP data without loading the database. Pipeline is PostgreSQL → Debezium → Kafka → Spark → Iceberg on S3 (MinIO) → Trino, with Airflow for optimisation. |
-| 0:40–1:30 | `make status`; Kafka Connect status JSON; `docker compose logs generator` | Debezium reads the WAL through a logical replication slot; one topic per table; the generator issues about 100 inserts/updates/deletes per second. |
-| 1:30–2:30 | `make logs` (Spark batches) + Spark UI | Each micro-batch does schema discovery → dedupe per key → one MERGE. Merge-on-read writes only small delete files. Point at the records/s and merge time per batch in the log. |
-| 2:30–3:10 | `make trino`: `SELECT count(*) FROM orders;` twice, a few seconds apart; then `make validate` | The data is live, and Postgres and Iceberg checksums match, so the copy is correct and not just close. |
-| 3:10–4:10 | `make demo-schema` | `ALTER TABLE` in Postgres shows up in Iceberg automatically: a new column, then int → bigint, with no restart and no rewrite. Old rows read NULL (schema-on-read). |
-| 4:10–4:50 | `make demo-timetravel` | Every batch is a snapshot. Query the order now, as of a snapshot id, and as of a timestamp, then do a change audit with EXCEPT. |
-| 4:50–5:40 | `make demo-gdpr` | The delete arrives as a position-delete file and the row disappears, but time travel still exposes it. The purge DAG rewrites the files and expires history, after which the data is truly erased. |
-| 5:40–6:40 | Airflow UI (DAG graph + task durations), then `summary.md` charts | Streaming produced many small files plus delete files. After partitioning by month, sorting and compaction, show the file count, storage and query-latency charts, and quote the speed-ups and compaction cost. |
-| 6:40–7:00 | Freshness histogram + summary | Quote the p50/p95 commit-to-query freshness and the throughput. Close with the limitations and future work (Hudi comparison, Atlas lineage). |
+| 0:00–0:40 | README architecture diagram, then the console **Overview** | Problem: analytics on live OLTP data without loading the database. The pipeline runs PostgreSQL → Debezium → Kafka → Spark → Iceberg on S3 (MinIO) → Trino, with Airflow for optimisation. The console checks all 10 components live. |
+| 0:40–1:30 | **Overview**: KPI cards, freshness and ingest charts, the workload card, recent micro-batches | Debezium reads the WAL through a logical replication slot, one topic per table. The workload issues about 100 inserts, updates and deletes per second. Each Spark micro-batch dedupes per key, then runs one MERGE: point at the events and MERGE time per batch. |
+| 1:30–2:40 | **Live CDC**: update a customer's balance and name, then insert an order and delete one | The trace shows the PostgreSQL commit, the WAL position, the micro-batch that merged it and the moment Trino sees it, with the measured latency. Both rows are shown side by side, including the CDC metadata columns. |
+| 2:40–3:20 | **Validation**: run with "wait until consistent" | Trino compares PostgreSQL and Iceberg on row counts and an order-independent checksum of every column. The copy is identical, not just close. |
+| 3:20–4:10 | **Tables & schema**: add column `loyalty_tier`, then widen `o_shippriority` to bigint | An `ALTER TABLE` in PostgreSQL reaches Iceberg as a new schema version, with no restart and no data rewritten. Old rows read NULL (schema-on-read). |
+| 4:10–4:50 | **Time travel**: open a snapshot, then the history of the customer changed in the Live CDC step | Every micro-batch is a snapshot. Compare a snapshot with now, open it in the SQL workbench (`FOR VERSION AS OF`), and show the highlighted versions of one row. |
+| 4:50–5:30 | **GDPR erasure**: show the customer, erase, then run the purge (or `make demo-gdpr`) | The delete arrives as a position-delete file: the row disappears from every query within seconds, but `FOR VERSION AS OF` still returns the name and phone. The purge DAG rewrites the files and expires history; the same query now fails because the snapshot no longer exists. |
+| 5:30–6:30 | **Maintenance** (file layout table, a DAG run's tasks), then **Benchmark** | Streaming creates small files and delete files. After partitioning by month, sorting and compaction there are 105 → 0 delete files, 89 % fewer objects, and the query suite runs 3.25× faster. Q06 got slower and why. |
+| 6:30–7:00 | **SQL workbench**: run Q04, then Grafana | Every result comes from Trino over Iceberg, read-only for the workbench user. Close with p50 7.3 s freshness, 4,844 rows/s ingest, the limitations, and future work (a Hudi comparison, lineage). |

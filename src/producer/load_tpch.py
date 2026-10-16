@@ -46,6 +46,12 @@ def main():
     for table, sql in LOADS:
         existing = t.scalar(f"SELECT count(*) FROM {OLTP}.{table}")
         if existing:
+            # The inserts are not one transaction (speed), so a run that died half-way leaves a
+            # short table; refuse to call that "loaded" rather than silently keep partial data.
+            expected = t.scalar(f"SELECT count(*) FROM tpch.{args.scale}.{table}")
+            if existing < expected:
+                raise SystemExit(f"{table}: has {existing} of {expected} rows from an interrupted load - "
+                                 "run `make clean && make up` and load again")
             print(f"{table}: already has {existing} rows, skipped")
             continue
         t0 = time.time()

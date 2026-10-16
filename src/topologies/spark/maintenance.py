@@ -6,7 +6,7 @@ Run one or more steps against one or more tables, e.g.
   spark-submit maintenance.py --tables shop.orders --layout --compact
   spark-submit maintenance.py --compact --rewrite-deletes --rewrite-manifests
   spark-submit maintenance.py --expire --expire-older-than-minutes 0 --retain-last 1
-  spark-submit maintenance.py --orphans --orphan-older-than-minutes 60
+  spark-submit maintenance.py --orphans --orphan-older-than-minutes 1440   # Iceberg minimum: 24 h
   spark-submit maintenance.py --tables shop.customer --purge          # GDPR erasure
 
 Steps (executed in this order when combined):
@@ -30,6 +30,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -51,7 +52,31 @@ LAYOUT_PLAN = {
     },
 }
 
+# Tables written by the pipeline itself (heartbeat, per-batch metrics). They commit every
+# few seconds, nobody time-travels in them, so their history is kept short: otherwise
+# thousands of snapshots and tiny files a day slow down every MERGE and freshness probe.
+OPERATIONAL_TABLES = {"shop.cdc_probe", "ops.ingest_batches"}
+OPERATIONAL_HISTORY_MINUTES = 60
+
 log = logging.getLogger("maintenance")
+TABLE_NAME = re.compile(r"^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$")
+# Errors caused by a concurrent commit (the streaming job commits every 10 s).
+RETRYABLE_MARKERS = ("CommitFailedException", "ValidationException", "Found conflicting",
+                     "Cannot commit", "CommitStateUnknownException", "found new delete")
+
+
+def with_retries(fn, what: str, attempts: int = 4):
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001 - Py4J wraps the Java exception
+            message = str(exc)
+            if attempt < attempts and any(m in message for m in RETRYABLE_MARKERS):
+                wait = min(5 * attempt, 30)
+                log.warning("%s: concurrent commit (attempt %d), retrying in %ss", what, attempt, wait)
+                time.sleep(wait)
+                continue
+            raise
 
 
 def ts_literal(dt: datetime) -> str:
@@ -125,30 +150,31 @@ def step_compact(spark, table, rewrite_all: bool, delete_file_threshold: int = 2
     if rewrite_all:
         options["rewrite-all"] = "true"
     opts = ", ".join(f"'{k}', '{v}'" for k, v in options.items())
-    result = first_row(spark.sql(
+    result = first_row(with_retries(lambda: spark.sql(
         f"CALL {CATALOG}.system.rewrite_data_files(table => '{table}', "
-        f"strategy => '{strategy}', options => map({opts}))"))
+        f"strategy => '{strategy}', options => map({opts}))"), f"rewrite_data_files {table}"))
     result["strategy"] = strategy
     result["rewrite_all"] = rewrite_all
     return result
 
 
 def step_rewrite_deletes(spark, table):
-    return first_row(spark.sql(
+    return first_row(with_retries(lambda: spark.sql(
         f"CALL {CATALOG}.system.rewrite_position_delete_files(table => '{table}', "
-        "options => map('rewrite-all', 'true'))"))
+        "options => map('rewrite-all', 'true'))"), f"rewrite_position_delete_files {table}"))
 
 
 def step_rewrite_manifests(spark, table):
-    return first_row(spark.sql(f"CALL {CATALOG}.system.rewrite_manifests(table => '{table}')"))
+    return first_row(with_retries(lambda: spark.sql(f"CALL {CATALOG}.system.rewrite_manifests(table => '{table}')"),
+                                  f"rewrite_manifests {table}"))
 
 
 def step_expire(spark, table, older_than_minutes: int, retain_last: int):
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=older_than_minutes)
-    result = first_row(spark.sql(
+    result = first_row(with_retries(lambda: spark.sql(
         f"CALL {CATALOG}.system.expire_snapshots(table => '{table}', "
-        f"older_than => {ts_literal(cutoff)}, retain_last => {retain_last}, "
-        "stream_results => true)"))
+        f"older_than => {ts_literal(cutoff)}, retain_last => {int(retain_last)}, "
+        "stream_results => true)"), f"expire_snapshots {table}"))
     result["older_than"] = cutoff.isoformat()
     return result
 
@@ -193,9 +219,13 @@ def run(spark: SparkSession, args) -> dict:
         tables = ([f"{DEFAULT_NAMESPACE}.{r.tableName}"
                    for r in spark.sql(f"SHOW TABLES IN {CATALOG}.{DEFAULT_NAMESPACE}").collect()]
                   if DEFAULT_NAMESPACE in namespaces else [])
+        if "ops" in namespaces:  # the streaming job's batch metrics need housekeeping too
+            tables += [f"ops.{r.tableName}" for r in spark.sql(f"SHOW TABLES IN {CATALOG}.ops").collect()]
     report = {"started_at": datetime.now(timezone.utc).isoformat(), "tables": {}}
 
     for table in tables:
+        if not TABLE_NAME.match(table):
+            raise SystemExit(f"invalid table name: {table!r} (expected <namespace>.<table>)")
         if not spark.catalog.tableExists(f"{CATALOG}.{table}"):
             log.warning("table %s does not exist, skipped", table)
             continue
@@ -223,7 +253,10 @@ def run(spark: SparkSession, args) -> dict:
         if args.purge:
             timed("purge_expire", step_expire, older_than_minutes=0, retain_last=1)
         elif args.expire:
-            timed("expire", step_expire, args.expire_older_than_minutes, args.retain_last)
+            minutes = args.expire_older_than_minutes
+            if table in OPERATIONAL_TABLES:
+                minutes = min(minutes, OPERATIONAL_HISTORY_MINUTES)
+            timed("expire", step_expire, minutes, args.retain_last)
         if args.orphans:
             timed("orphans", step_orphans, args.orphan_older_than_minutes)
 
@@ -238,16 +271,18 @@ def run(spark: SparkSession, args) -> dict:
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--tables", type=lambda s: [t.strip() for t in s.split(",") if t.strip()],
-                   help="comma separated <namespace>.<table>; default: all tables in 'shop'")
+                   default=[t.strip() for t in os.getenv("TABLES", "").split(",") if t.strip()],
+                   help="comma separated <namespace>.<table> (or $TABLES); default: all tables in 'shop' and 'ops'")
     p.add_argument("--layout", action="store_true")
     p.add_argument("--compact", action="store_true")
     p.add_argument("--rewrite-deletes", action="store_true")
     p.add_argument("--rewrite-manifests", action="store_true")
     p.add_argument("--expire", action="store_true")
     p.add_argument("--expire-older-than-minutes", type=int, default=24 * 60)
-    p.add_argument("--retain-last", type=int, default=5)
+    p.add_argument("--retain-last", type=int, default=10)
     p.add_argument("--orphans", action="store_true")
-    p.add_argument("--orphan-older-than-minutes", type=int, default=24 * 60)
+    p.add_argument("--orphan-older-than-minutes", type=int, default=24 * 60,
+                   help="Iceberg refuses thresholds below 24 h (1440); smaller values are raised to it")
     p.add_argument("--purge", action="store_true")
     p.add_argument("--json-out", help="write the statistics report to this path")
     args = p.parse_args()

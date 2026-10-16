@@ -13,7 +13,8 @@ For every micro-batch and every captured table (one Kafka topic per table):
 4. Apply the batch with one MERGE INTO: deletes, updates and inserts. MERGE is
    idempotent, so a replayed micro-batch after a crash yields the same table
    state (effectively exactly-once together with the Spark checkpoint).
-5. Append per-table batch statistics to `lakehouse.ops.ingest_batches`.
+5. Append per-table batch statistics to `lakehouse.ops.ingest_batches`. A replayed
+   micro-batch appends its rows again, so readers aggregate per (batch_id, table_name).
 
 Tables use Iceberg format v2 with merge-on-read so the streaming writes stay
 cheap; the resulting small/delete files are cleaned up by the maintenance jobs.
@@ -39,7 +40,7 @@ CHECKPOINT = os.getenv("CHECKPOINT_DIR", "/opt/checkpoints/cdc_to_iceberg")
 TRIGGER = os.getenv("TRIGGER_INTERVAL", "10 seconds")
 MAX_OFFSETS = int(os.getenv("MAX_OFFSETS_PER_TRIGGER", "100000"))
 METRICS_TABLE = f"{CATALOG}.ops.ingest_batches"
-COMMIT_RETRIES = 6
+COMMIT_RETRIES = int(os.getenv("COMMIT_RETRIES", "6"))
 
 # Columns added by the pipeline to every lakehouse table.
 META_FIELDS = [
@@ -70,6 +71,12 @@ RETRYABLE_MARKERS = (
 )
 
 log = logging.getLogger("cdc_to_iceberg")
+
+# Per table: the Debezium schema signature last applied and the Iceberg column types at that
+# time. While the signature is unchanged, a micro-batch needs no catalog round trips at all
+# (CREATE NAMESPACE, tableExists, two schema reads), which is the common case for every batch
+# after the first. A commit conflict or any MERGE failure clears the entry.
+KNOWN: dict[str, tuple[tuple, dict]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -279,8 +286,14 @@ def process_topic(spark: SparkSession, batch_id: int, topic: str, rows: DataFram
               .where(F.col("e.op").isin("c", "r", "u", "d")))
 
     spark_fields = [T.StructField(f["field"], target_type(f)) for f in fields]
-    changes = ensure_table(spark, table, namespace, pks, spark_fields)
-    table_types = {f.name: f.dataType for f in spark.table(table).schema.fields}
+    signature = tuple((f.name, f.dataType.simpleString()) for f in spark_fields) + (tuple(pks),)
+    known = KNOWN.get(table)
+    if known and known[0] == signature:
+        changes, table_types = [], known[1]
+    else:
+        changes = ensure_table(spark, table, namespace, pks, spark_fields)
+        table_types = {f.name: f.dataType for f in spark.table(table).schema.fields}
+        KNOWN[table] = (signature, table_types)
 
     cols = []
     for f in fields:
@@ -326,7 +339,11 @@ def process_topic(spark: SparkSession, batch_id: int, topic: str, rows: DataFram
             WHEN NOT MATCHED AND s._cdc_op <> 'd' THEN INSERT ({insert_cols}) VALUES ({insert_vals})
         """
         started = time.time()
-        with_retries(lambda: spark.sql(merge_sql), f"MERGE {table}")
+        try:
+            with_retries(lambda: spark.sql(merge_sql), f"MERGE {table}")
+        except Exception:
+            KNOWN.pop(table, None)  # re-read the table on the next attempt
+            raise
         spark.catalog.dropTempView(view)
         duration_ms = int((time.time() - started) * 1000)
     finally:
@@ -386,8 +403,11 @@ def process_batch(batch: DataFrame, batch_id: int) -> None:
     metric_rows = [(batch_id, s["table"], s["kafka_records"], s["rows"], s["inserts"],
                     s["updates"], s["deletes"], s["merge_ms"], started, finished,
                     s["schema_changes"]) for s in results]
-    with_retries(lambda: spark.createDataFrame(metric_rows, METRICS_SCHEMA)
-                 .writeTo(METRICS_TABLE).append(), "metrics append")
+    try:
+        with_retries(lambda: spark.createDataFrame(metric_rows, METRICS_SCHEMA)
+                     .writeTo(METRICS_TABLE).append(), "metrics append")
+    except Exception as exc:  # noqa: BLE001 - the data MERGEs are committed; losing one metrics row is fine
+        log.warning("batch %d: metrics append failed, continuing: %s", batch_id, str(exc).splitlines()[0][:200])
     for s in results:
         log.info("batch %d %-16s records=%-7d merged=%-7d (+%d ~%d -%d) merge=%dms%s",
                  batch_id, s["table"], s["kafka_records"], s["rows"], s["inserts"],
@@ -401,8 +421,12 @@ def main() -> None:
 
     spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {CATALOG}.ops")
     cols = ", ".join(f"{q(f.name)} {f.dataType.simpleString()}" for f in METRICS_SCHEMA.fields)
-    spark.sql(f"CREATE TABLE IF NOT EXISTS {METRICS_TABLE} ({cols}) USING iceberg "
-              "TBLPROPERTIES ('format-version'='2')")
+    # The metrics table commits once per micro-batch (thousands of commits a day), so it needs
+    # the same metadata housekeeping as the business tables.
+    props_sql = ", ".join(f"'{k}'='{v}'" for k, v in TABLE_PROPERTIES.items())
+    spark.sql(f"CREATE TABLE IF NOT EXISTS {METRICS_TABLE} ({cols}) USING iceberg TBLPROPERTIES ({props_sql})")
+    for k, v in TABLE_PROPERTIES.items():  # tables created by an earlier version get the properties too
+        spark.sql(f"ALTER TABLE {METRICS_TABLE} SET TBLPROPERTIES ('{k}'='{v}')")
 
     stream = (spark.readStream.format("kafka")
               .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)

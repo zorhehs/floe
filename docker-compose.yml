@@ -2,8 +2,13 @@
 # PostgreSQL -> Debezium (Kafka Connect) -> Kafka -> Spark Structured Streaming
 #   -> Apache Iceberg (REST catalog, MinIO/S3) -> Trino; Airflow runs optimisation.
 #
-# Memory limits are sized for Docker Desktop with 8 GB (steady state ~6 GB); 10-12 GB gives
-# comfortable headroom. Limits are upper bounds: the VM must not run out of memory as a whole.
+# Memory limits are per-service caps that add up to ~11 GB; the stack runs at ~6 GB in steady
+# state on a Docker Desktop VM with 8 GB (10-12 GB gives headroom). A cap only matters when one
+# service misbehaves: the VM as a whole must not run out of memory.
+#
+# Every host port is bound to 127.0.0.1: the services carry local-development credentials
+# (see .env.example) and several of them accept writes (PostgreSQL, Trino, Kafka Connect,
+# the Iceberg REST catalog, MinIO, Airflow).
 
 x-aws-env: &aws-env
   AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
@@ -31,12 +36,13 @@ services:
       DEBEZIUM_DB_PASSWORD: ${DEBEZIUM_DB_PASSWORD}
       CATALOG_DB_USER: ${CATALOG_DB_USER}
       CATALOG_DB_PASSWORD: ${CATALOG_DB_PASSWORD}
-    ports: ["5433:5432"]
+    ports: ["127.0.0.1:5433:5432"]
     volumes:
       - ./config/postgres/init:/docker-entrypoint-initdb.d:ro
       - pg-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d ${POSTGRES_DB}"]
+      # -h: the TCP listener, not the init-time unix-socket server that runs before 00-roles.sh
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d ${POSTGRES_DB}"]
       interval: 5s
       retries: 20
     mem_limit: 512m
@@ -62,14 +68,17 @@ services:
       KAFKA_LOG_DIRS: /var/lib/kafka/data
       KAFKA_HEAP_OPTS: -Xms384m -Xmx384m
       CLUSTER_ID: lakehouse-kraft-cluster-01
-    ports: ["29092:29092"]
+    ports: ["127.0.0.1:29092:29092"]
     volumes:
       - kafka-data:/var/lib/kafka/data
     healthcheck:
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null"]
-      interval: 10s
+      # the check launches a JVM of its own: keep its heap small, not the broker's 384 MB
+      test: ["CMD-SHELL", "KAFKA_HEAP_OPTS=-Xmx64m /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null"]
+      interval: 30s
       timeout: 20s
       retries: 20
+      start_period: 30s
+      start_interval: 5s
     mem_limit: 768m
     restart: unless-stopped
 
@@ -97,7 +106,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       DEBEZIUM_DB_USER: ${DEBEZIUM_DB_USER}
       DEBEZIUM_DB_PASSWORD: ${DEBEZIUM_DB_PASSWORD}
-    ports: ["8083:8083"]
+    ports: ["127.0.0.1:8083:8083"]
     healthcheck:
       test: ["CMD-SHELL", "curl -fs http://localhost:8083/connectors >/dev/null"]
       interval: 10s
@@ -116,13 +125,15 @@ services:
 
   # ------------------------------------------------------------- lake storage
   minio:
+    # The official minio/minio Docker images were withdrawn in 2025; pgsty publishes rebuilds of the
+    # upstream releases. Tag-pinned here; pin by digest for a shared deployment.
     image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
       MINIO_PROMETHEUS_AUTH_TYPE: public
-    ports: ["9000:9000", "9001:9001"]
+    ports: ["127.0.0.1:9000:9000", "127.0.0.1:9001:9001"]
     volumes:
       - minio-data:/data
     healthcheck:
@@ -167,7 +178,7 @@ services:
       CATALOG_JDBC_PASSWORD: ${CATALOG_DB_PASSWORD}
       CATALOG_JDBC_SCHEMA__VERSION: V1
       JAVA_TOOL_OPTIONS: -Xmx256m
-    ports: ["8181:8181"]
+    ports: ["127.0.0.1:8181:8181"]
     volumes:
       - ./config/docker/catalog-jars:/opt/catalog-jars:ro
     healthcheck:
@@ -197,7 +208,7 @@ services:
       KAFKA_BOOTSTRAP: kafka:9092
       TRIGGER_INTERVAL: ${TRIGGER_INTERVAL}
       MAX_OFFSETS_PER_TRIGGER: ${MAX_OFFSETS_PER_TRIGGER}
-    ports: ["4040:4040"]
+    ports: ["127.0.0.1:4040:4040"]
     volumes:
       - ./src/topologies/spark:/opt/jobs:ro
       - ./config/spark:/opt/spark/conf:ro
@@ -216,11 +227,13 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       APP_DB_USER: ${APP_DB_USER}
       APP_DB_PASSWORD: ${APP_DB_PASSWORD}
-    ports: ["8080:8080"]
+    ports: ["127.0.0.1:8080:8080"]
     volumes:
       - ./config/trino/catalog:/etc/trino/catalog:ro
       - ./config/trino/config.properties:/etc/trino/config.properties:ro
       - ./config/trino/jvm.config:/etc/trino/jvm.config:ro
+      - ./config/trino/access-control.properties:/etc/trino/access-control.properties:ro
+      - ./config/trino/rules.json:/etc/trino/rules.json:ro
       - ./src/consumers/queries:/opt/queries:ro
     mem_limit: 1536m
     restart: unless-stopped
@@ -239,11 +252,11 @@ services:
       AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
       AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
       AIRFLOW__WEBSERVER__WORKERS: 1
-      AIRFLOW__WEBSERVER__SECRET_KEY: lakehouse-local-dev-secret
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
       AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: 30
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/state/airflow.db
       MPLCONFIGDIR: /tmp/matplotlib
-    ports: ["8088:8080"]
+    ports: ["127.0.0.1:8088:8080"]
     volumes:
       - ./src/topologies/airflow:/opt/airflow/dags:ro
       - ./src/topologies/spark:/opt/jobs:ro
@@ -251,6 +264,7 @@ services:
       - ./results:/opt/results
       - airflow-home:/opt/airflow/state
     mem_limit: 2816m   # Airflow (~0.7 GB) + one local-mode Spark maintenance job (1.2 GB heap + capped off-heap)
+    init: true         # reaps the entrypoint's background unpause helper after `exec airflow standalone`
     restart: unless-stopped
 
   # ------------------------------------------------------------- tools (on demand)
@@ -279,6 +293,7 @@ services:
       - ./results:/opt/results
 
   generator:
+    build: {<<: *build, target: tools}   # the one build: of floe/tools (console and exporter reuse the image)
     image: floe/tools:latest
     profiles: ["workload"]
     command: ["python3", "-m", "producer.generator"]
@@ -287,6 +302,33 @@ services:
       WORKLOAD_OPS_PER_SEC: ${WORKLOAD_OPS_PER_SEC}
     volumes:
       - ./src:/opt/src:ro
+    mem_limit: 256m
+    restart: unless-stopped
+
+  # ------------------------------------------------------------- web console
+  console:
+    image: floe/tools:latest
+    command: ["python3", "-m", "console.app", "--port", "8090"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      trino: {condition: service_started}
+    environment:
+      <<: *tools-env
+      CONNECT_URL: http://connect:8083
+      PROMETHEUS_URL: http://prometheus:9090
+      SPARK_UI_URL: http://spark-streaming:4040
+      ICEBERG_REST_URL: http://iceberg-rest:8181
+      GRAFANA_URL: http://grafana:3000
+    # Local only: the console can write to the source database.
+    ports: ["127.0.0.1:8090:8090"]
+    volumes:
+      - ./src:/opt/src:ro
+      - ./src/consumers/queries:/opt/queries:ro
+      - ./results:/opt/results:ro
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8090/api/ping', timeout=3)"]
+      interval: 15s
+      retries: 5
     mem_limit: 256m
     restart: unless-stopped
 
@@ -310,7 +352,7 @@ services:
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.retention.time=7d
-    ports: ["9090:9090"]
+    ports: ["127.0.0.1:9090:9090"]
     volumes:
       - ./config/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./config/monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
@@ -327,7 +369,7 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/lakehouse.json
-    ports: ["3000:3000"]
+    ports: ["127.0.0.1:3000:3000"]
     volumes:
       - ./config/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./config/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro

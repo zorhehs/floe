@@ -13,8 +13,23 @@
 | Catalog | Iceberg REST catalog (JDBC store in PostgreSQL db `iceberg_catalog`) | Atomic pointer to each table's current metadata file | `iceberg-rest` |
 | Storage | MinIO (S3 API) | Data, delete, manifest and metadata files under `s3://warehouse/` | `minio` |
 | Query | Trino 476 | SQL over Iceberg (and PostgreSQL for validation) | `trino` |
-| Orchestration | Airflow 2.10 | Scheduled and manual Spark maintenance DAGs | `airflow` |
+| Orchestration | Airflow 2.10 (SQLite, SequentialExecutor: one task at a time) | Scheduled and manual Spark maintenance DAGs | `airflow` |
 | Monitoring | Prometheus 3, Grafana 12, custom exporter | Freshness, lag, throughput, file health, alerts | `exporter`, `prometheus`, `grafana` |
+| Interface | Floe Console (Python standard-library server + single-page app) | Operate and demonstrate the pipeline: health and alert rules, live CDC trace, schema evolution, time travel, read-only SQL, Airflow DAGs, GDPR erasure, validation, recorded benchmark | `console` |
+
+### Floe Console
+
+The console (`src/console/app.py`, port 8090, bound to localhost) talks to the components through their own interfaces. It never bypasses the pipeline:
+
+* **PostgreSQL** (psycopg): writes for the live trace, the workload and schema changes, so every change still travels through Debezium and Spark.
+* **Trino**: every lakehouse read, including `$snapshots`, `$files`, `FOR VERSION AS OF` and the `postgresql` catalog for validation. The SQL workbench connects as Trino user `workbench`. Trino's file-based access control (`config/trino/rules.json`) makes that user read-only on every catalog, so even `EXPLAIN ANALYZE INSERT …` is denied by the engine, not only by the console's keyword check.
+* **Airflow REST API**: trigger and follow the maintenance DAGs.
+* **GDPR erasure page**: deletes the customer and their orders in PostgreSQL (so the change travels through CDC), proves with `FOR VERSION AS OF` that the pre-erasure snapshot still exposes the data, then runs the purge DAG and shows the same query failing. The workload can be paused for the purge so the file counts are comparable.
+* **Prometheus alert rules** (`/api/v1/rules`): the Overview shows every rule with its live state (inactive, pending, firing).
+* **Kafka Connect, Spark UI, Iceberg REST, MinIO, Grafana**: health checks.
+* **Prometheus**: freshness and ingest series.
+
+Long operations (a trace, a schema change, validation, a data load) run as background jobs that the browser polls through `/api/jobs/<id>`. Snapshot ids are 64-bit and are sent as strings so JavaScript does not round them.
 
 ## Data flow of one change
 
@@ -59,6 +74,7 @@ sequenceDiagram
   * `customer` is sorted by `c_nationkey, c_custkey`.
   * `rewrite_data_files` runs with the sort strategy (target 128 MB, applies all deletes), followed by `rewrite_position_delete_files`, `rewrite_manifests`, `expire_snapshots` and `remove_orphan_files` (Iceberg enforces a minimum age of 24 h so that files of in-flight commits are never deleted; the storage listing is supplied through the S3 API).
 * **Routine maintenance (`iceberg_maintenance`, hourly):** compaction with delete thresholds, delete and manifest rewrite, expiry of snapshots older than one day (keeping 10), and orphan cleanup.
+* **GDPR purge (`iceberg_gdpr_purge`):** rewrites every data file that has deletes and expires all older snapshots, so the erased rows no longer exist in storage. The Kafka change events that carried them remain until the topic retention (7 days) removes them.
 
 ## Consistency and failure handling
 
@@ -68,6 +84,8 @@ sequenceDiagram
 | Compaction commits concurrently with a MERGE | Iceberg optimistic concurrency rejects one commit. The streaming job retries with backoff, and the DAG tasks retry twice. |
 | Debezium / Connect restart | Resumes from the stored offset (LSN). The replication slot keeps the WAL until it is confirmed. `max_slot_wal_keep_size=4GB` protects the source disk. |
 | Kafka unavailable | Debezium pauses; the WAL is retained in PostgreSQL. |
+| Debezium task FAILED (for example after a PostgreSQL restart) | `connect-init` restarts the failed task through the Connect REST API; the connector resumes from its stored LSN. |
+| PostgreSQL restart while the workload runs | The generator and the console workload reconnect; rolled-back ticks are not counted. |
 | Catalog restart | Catalog state (the pointer to each table's current metadata file) lives in the PostgreSQL database `iceberg_catalog`, whose commits are atomic and safe under concurrency. An early SQLite version failed with `SQLITE_BUSY` under concurrent commits. Table data and metadata are in MinIO. |
 
 ## Scalability (cloud deployment)

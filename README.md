@@ -15,7 +15,8 @@ The pipeline works as follows:
 4. **Trino** runs the queries.
 5. **Airflow** runs the compaction and partition-optimisation jobs.
 6. **Prometheus/Grafana** monitor the whole pipeline.
-7. A benchmark compares query performance and storage footprint before and after optimisation.
+7. The **Floe Console** (http://localhost:8090) is the web interface for running and demonstrating all of it.
+8. A benchmark compares query performance and storage footprint before and after optimisation.
 
 ```mermaid
 flowchart LR
@@ -30,7 +31,12 @@ flowchart LR
   AF[Airflow] -- spark-submit --> MJ[Compaction · partition evolution<br/>expire · orphans · GDPR purge]
   MJ --> ICE
   EXP[Exporter] --> PROM[Prometheus] --> GRA[Grafana]
+  UI[Floe Console] -.-> PG & T & AF & PROM
 ```
+
+![Floe Console, overview page](docs/console.png)
+
+<sub>Light mode shown; [dark mode](docs/console-dark.png) is one click away in the header.</sub>
 
 ## Quick start
 
@@ -42,7 +48,7 @@ Prerequisites:
 
 ```bash
 ./scripts/setup.sh        # checks, .env, verified jar downloads, image pulls + builds
-./scripts/run_demo.sh     # stack up → TPC-H load → live CDC workload → validation → sample queries
+./scripts/run_demo.sh     # stack up → TPC-H tiny load → live CDC workload → validation → sample queries
 ./scripts/run_demo.sh --full   # TPC-H sf1 + schema/time-travel/GDPR demos + full benchmark
 ./scripts/cleanup.sh [--volumes]
 ```
@@ -51,6 +57,7 @@ Step-by-step instructions, configuration and troubleshooting are in **[docs/depl
 
 | Service | URL | Login |
 |---|---|---|
+| **Floe Console** (web interface) | http://localhost:8090 | – (bound to localhost only) |
 | Grafana (pipeline dashboard) | http://localhost:3000 | anonymous view, or admin / admin |
 | Trino | http://localhost:8080 | any user name |
 | Airflow | http://localhost:8088 | admin / admin |
@@ -59,19 +66,41 @@ Step-by-step instructions, configuration and troubleshooting are in **[docs/depl
 | Prometheus | http://localhost:9090 | – |
 | PostgreSQL | localhost:5433 / `oltp` | app / app |
 
+## Floe Console
+
+Once the stack is up, open **http://localhost:8090** (`make console`). One interface runs and shows the whole pipeline without a terminal:
+
+| Page | What you can do |
+|---|---|
+| **Overview** | Health of all 10 components, live freshness, ingest rate, replication lag and micro-batches, plus the Prometheus alert rules and their state. Start or stop the OLTP workload, or load TPC-H into an empty database. |
+| **Live CDC** | Update a customer, insert or delete an order in PostgreSQL and follow it until Trino sees it in Iceberg: commit → WAL position → micro-batch → visible, with the measured latency and both rows side by side. |
+| **Tables & schema** | Row counts in PostgreSQL vs Iceberg, data and delete files, snapshots. Add a column or widen `integer` → `bigint` in PostgreSQL and watch Iceberg evolve its schema. |
+| **Time travel** | Every snapshot of a table, a snapshot compared with now, and the history of one row across the last 12 snapshots. |
+| **SQL workbench** | Run the 8 benchmark queries or any read-only query on Trino, see time and rows scanned, export CSV. Runs as Trino user `workbench`, which `config/trino/rules.json` makes read-only on every catalog. |
+| **Maintenance** | Trigger the Airflow compaction, layout and GDPR purge DAGs, follow their tasks, and see the file layout they leave behind. |
+| **GDPR erasure** | Pick a customer, erase them in PostgreSQL and watch the delete reach Iceberg as a merge-on-read delete that time travel can still read. Then run the purge DAG and see the old snapshot disappear. |
+| **Validation** | PostgreSQL vs Iceberg row counts and checksums for every table. |
+| **Benchmark** | The recorded before/after results of `make bench`. |
+
+The console has a light and a dark mode (toggle in the header, or `?theme=dark` in the URL). The screenshot above is produced by `./scripts/screenshot-console.sh` (headless Chrome on the host). The console (`src/console/`) is a small Python server using only the standard library and the clients already in the tools image, plus a dependency-free single-page app. Long operations run as background jobs that the page polls. It listens on localhost only, because it can write to the source database.
+
 ## Make targets
 
 | Command | What it does |
 |---|---|
+| `make jars` / `make pull` / `make build` | Verify the pinned Spark jars (offline when present), pull third-party images, build the three images |
 | `make up` / `make down` / `make clean` | Start, stop, or stop and delete all data |
 | `make status` | Container health, connector state, Kafka topics |
-| `make load` | TPC-H → PostgreSQL. Measures the time until it is queryable in Iceberg (ingestion throughput). |
+| `make load` | TPC-H → PostgreSQL. Measures the time until it is queryable in Iceberg (ingestion throughput). Skipped when the tables already hold rows, so run it on a fresh `make clean && make up` for the sf1 numbers. |
 | `make workload-start` / `make workload-stop` | Synthetic OLTP inserts, updates and deletes |
 | `make validate` | PostgreSQL vs Iceberg row counts and checksums |
 | `make demo-schema` / `make demo-timetravel` / `make demo-gdpr` | Scripted demonstrations |
-| `make bench` | Freshness test, then a before/after optimisation benchmark → `results/` |
+| `make freshness` / `make optimize` / `make bench` | Freshness test, before/after optimisation benchmark, or both → `results/` |
+| `make report` | Rebuild the charts and `summary.md` of the latest benchmark |
+| `make maintenance-now` | Run the hourly maintenance job once, right now |
+| `make console` | Open the Floe Console in the browser |
 | `make trino` / `make psql` / `make logs` | CLIs and logs |
-| `make test` | Unit tests (needs `pip install pyspark==3.5.6 pytest`) |
+| `make test` / `make test-integration` | Unit tests (`pip install -r tests/requirements.txt && pip install pyspark==3.5.6`, Java 17 for the Spark test) / the ~15 min full-pipeline test |
 
 ## Deliverables
 
@@ -85,9 +114,11 @@ Step-by-step instructions, configuration and troubleshooting are in **[docs/depl
 | 6 | Before/after performance report | `results/benchmark-*/summary.md` (`make bench`) |
 | 7 | Demo video (5–8 min) | script in `docs/DEMO_SCRIPT.md` (link added after recording) |
 | 8 | Technical report (IEEE format, PDF) | [`docs/report/report.pdf`](docs/report/report.pdf); LaTeX source in `docs/report/latex/` (Overleaf-ready zip included), regenerated from results by `docs/report/latex/build_tex.py` |
-| + | Extra credit: GDPR row-level deletes and merge-on-read | `scripts/demos/gdpr_delete.sh`, DAG `iceberg_gdpr_purge` |
+| + | Extra credit: GDPR row-level deletes and merge-on-read | Console page **GDPR erasure**, `scripts/demos/gdpr_delete.sh`, DAG `iceberg_gdpr_purge` |
 | + | Monitoring | `config/monitoring/` (Prometheus, alert rules, Grafana dashboard), `src/consumers/exporter.py` |
-| + | CI | `.github/workflows/build.yml`: lint, unit tests, image build, full-stack integration test |
+| + | CI | `.github/workflows/build.yml`: lint, unit tests and image build on every push and pull request; the full-stack integration test on pushes to `main`, release tags and on request |
+| + | Web interface | Floe Console, `src/console/` (http://localhost:8090) |
+| + | Presentation slides | `docs/slides/cc-streaming-group04.pptx` (PDF export alongside); brief in `docs/slides/SLIDES_BRIEF.md` |
 
 ## How it works (short)
 
@@ -115,6 +146,7 @@ Step-by-step instructions, configuration and troubleshooting are in **[docs/depl
    * per-table data and delete files, snapshots and bytes
 
    Prometheus alert rules cover freshness, a stopped connector, WAL growth, small-file build-up and a stalled stream.
+6. **Housekeeping.** The hourly `iceberg_maintenance` DAG is active from the start. The heartbeat table and the streaming job's metrics table commit every few seconds, so the job keeps only one hour of their history; business tables keep 24 hours for time travel.
 
 ## Evaluation metrics
 
@@ -129,14 +161,14 @@ Step-by-step instructions, configuration and troubleshooting are in **[docs/depl
 
 ### Results at a glance
 
-Measured on one laptop (Apple silicon, 8 cores, Docker limited to 8 GB) with TPC-H sf1 and a 100 ops/s OLTP workload.
+Measured on one laptop (Apple silicon, 8 cores, Docker limited to 8 GB; the per-service `mem_limit`s in the compose file are caps that add up to 11 GB, the measured steady state is about 6 GB) with TPC-H sf1 and a 100 ops/s OLTP workload.
 Raw data and charts are in [results/](results/); the full analysis is in the [technical report](docs/report/report.pdf).
 
 | Metric | Result |
 |---|---|
 | Ingestion (initial load, 1.65 M rows) | **4,844 rows/s** end-to-end, queryable in Iceberg after 341 s, checksums identical |
 | CDC end-to-end freshness (PostgreSQL commit → Trino) | p50 **7.3 s**, p95 11.7 s, max 12.7 s |
-| Query suite after the optimisation DAG | **3.25× faster** overall (single month 7.4×, 4-way join 5.9×, full aggregate 0.95×) |
+| Query suite after the optimisation DAG | **3.25× faster** overall (single month 7.4×, four-table join 5.9×, full aggregate 0.95×) |
 | Small files | delete files 105 → 0; objects in storage 2,151 → 246 (−89 %); bytes ≈ unchanged |
 | Compaction overhead | 170 s for the full layout-optimisation DAG |
 | Correctness | PostgreSQL = Iceberg (row counts + checksums) before and after optimisation |
@@ -150,6 +182,7 @@ floe/
 │   ├── producer/        # TPC-H loader, OLTP workload generator
 │   ├── topologies/      # spark/ (CDC streaming job, maintenance job), airflow/ (DAGs)
 │   ├── consumers/       # Trino query suite, benchmark, validation, Prometheus exporter
+│   ├── console/         # Floe Console: web interface (Python server + static single-page app)
 │   └── common/          # shared connections (PostgreSQL, Trino, Airflow API)
 ├── config/
 │   ├── docker/          # Dockerfile (spark | tools | airflow targets), jars (downloaded)
@@ -168,7 +201,9 @@ floe/
 * **Dropped columns** in PostgreSQL stay in Iceberg; new rows get NULL there. Type changes that Iceberg cannot apply in place are cast to the existing type and logged.
 * **Columns added with a non-NULL `DEFAULT`** reach Iceberg only for rows changed afterwards. PostgreSQL fills in existing rows without writing WAL row events, which is a standard Debezium limitation. `make validate` reports such columns.
 * **`TRUNCATE`** is not propagated (Debezium default), and tables need a primary key to be captured.
-* **Deployment:** single-node, local mode. The credentials in `.env.example` are for local development only.
+* **GDPR purge scope:** the purge DAG erases the rows from every Iceberg data file and snapshot, but the change events that carried them stay in Kafka until the topic retention (7 days, `topic.creation.default.retention.ms`) removes them. Shorten the retention or delete the records up to the purge offset if that window matters.
+* **Airflow** runs on SQLite with the SequentialExecutor (one task at a time): a running hourly maintenance task delays a purge or layout run triggered meanwhile.
+* **Deployment:** single-node, local mode. Every host port is bound to `127.0.0.1`, and the credentials in `.env.example` are for local development only.
 
 ## License
 

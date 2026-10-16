@@ -4,9 +4,9 @@ DC    := docker compose
 TOOLS := $(DC) --profile tools run --rm tools python3 -m
 
 .DEFAULT_GOAL := help
-.PHONY: help jars pull build up down clean status load workload-start workload-stop validate \
+.PHONY: help jars pull build up down clean status load workload-start workload-stop validate console \
         freshness optimize bench report demo-schema demo-timetravel demo-gdpr trino psql \
-        logs maintenance-now test
+        logs maintenance-now test test-integration
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -23,7 +23,7 @@ build: jars ## Build the Spark / tools / Airflow images
 up: jars ## Start the whole stack (Postgres, Kafka, Debezium, MinIO, Iceberg REST, Spark, Trino, Airflow)
 	$(DC) --profile tools build
 	$(DC) up -d
-	@echo "Grafana http://localhost:3000 | Trino http://localhost:8080 | Airflow http://localhost:8088 | MinIO http://localhost:9001 | Spark UI http://localhost:4040"
+	@echo "Console http://localhost:8090 | Grafana http://localhost:3000 | Trino http://localhost:8080 | Airflow http://localhost:8088 | MinIO http://localhost:9001 | Spark UI http://localhost:4040"
 
 down: ## Stop the stack (keeps data)
 	$(DC) --profile tools --profile workload down
@@ -48,7 +48,7 @@ workload-stop: ## Stop the synthetic OLTP workload
 validate: ## Compare PostgreSQL and Iceberg (row counts + checksums), waiting up to 10 min
 	$(TOOLS) consumers.validate --wait 600
 
-freshness: ## Measure CDC end-to-end freshness (runs the workload during the test)
+freshness: ## Measure CDC end-to-end freshness (starts the workload and leaves it running; optimize stops it)
 	$(DC) --profile workload up -d generator
 	sleep 20
 	$(TOOLS) consumers.bench freshness --probes 40 --interval 2
@@ -62,9 +62,8 @@ bench: freshness optimize ## Full evaluation: freshness, then before/after optim
 report: ## Rebuild charts + summary.md of the latest benchmark
 	$(TOOLS) consumers.bench report
 
-maintenance-now: ## Run the hourly maintenance job once, right now (spark-submit in Airflow)
-	$(DC) exec airflow spark-submit --master 'local[2]' --driver-memory 1200m --conf 'spark.driver.extraJavaOptions=-Daws.region=us-east-1 -XX:MaxDirectMemorySize=256m -XX:MaxMetaspaceSize=256m' /opt/jobs/maintenance.py \
-	  --compact --rewrite-deletes --rewrite-manifests --expire --orphans
+maintenance-now: ## Run the hourly maintenance job once, right now (same command as the DAG)
+	$(DC) exec airflow /opt/jobs/maintenance.sh --compact --rewrite-deletes --rewrite-manifests --expire --orphans
 
 demo-schema: ## Demo: schema evolution (add column, widen type) flowing into Iceberg
 	./scripts/demos/schema_evolution.sh
@@ -75,6 +74,10 @@ demo-timetravel: ## Demo: Iceberg snapshots and time travel
 demo-gdpr: ## Demo: GDPR erasure (row-level delete, merge-on-read, physical purge)
 	./scripts/demos/gdpr_delete.sh
 
+console: ## Open the Floe Console (web interface) in the browser
+	@url=http://localhost:8090; echo "Floe Console: $$url"; \
+	  (command -v open >/dev/null && open "$$url") || (command -v xdg-open >/dev/null && xdg-open "$$url") || true
+
 trino: ## Interactive Trino CLI
 	$(DC) exec trino trino --catalog lakehouse --schema shop
 
@@ -84,8 +87,8 @@ psql: ## Interactive psql on the source database
 logs: ## Follow the Spark streaming job logs
 	$(DC) logs -f spark-streaming
 
-test: ## Unit tests (pytest)
+test: ## Unit tests (pip install -r tests/requirements.txt && pip install pyspark==3.5.6; Java 17 for the Spark test)
 	python3 -m pytest -q tests/unit
 
-test-integration: ## Full pipeline integration test (stack must be built)
+test-integration: ## Full pipeline integration test (~15 min; leaves the stack running with a re-laid-out orders table)
 	./tests/integration/test_pipeline.sh

@@ -57,6 +57,7 @@ fi
 cat <<'MSG'
 
 Explore:
+  Console    http://localhost:8090   (Floe web interface: live CDC, tables, time travel, SQL, maintenance)
   Grafana    http://localhost:3000   (pipeline dashboard)
   Trino      http://localhost:8080   (make trino for the CLI)
   Airflow    http://localhost:8088   (admin / admin)
