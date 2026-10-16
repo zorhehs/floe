@@ -1,26 +1,81 @@
 {
  "uid": "lakehouse-cdc",
- "title": "Floe \u00b7 CDC pipeline",
+ "title": "Floe · CDC pipeline",
+ "description": "PostgreSQL → Debezium → Kafka → Spark → Iceberg on MinIO → Trino. Blue is the data path and healthy; red means attention. Red lines are the alert thresholds from config/monitoring/alerts.yml.",
  "schemaVersion": 39,
- "version": 2,
+ "version": 3,
+ "editable": true,
+ "graphTooltip": 1,
  "refresh": "10s",
  "time": {
   "from": "now-30m",
   "to": "now"
  },
+ "timepicker": {
+  "refresh_intervals": [
+   "5s",
+   "10s",
+   "30s",
+   "1m",
+   "5m"
+  ]
+ },
+ "timezone": "browser",
  "tags": [
   "floe",
   "cdc",
   "iceberg"
  ],
+ "links": [
+  {
+   "title": "Floe Console",
+   "type": "link",
+   "url": "http://localhost:8090",
+   "icon": "external link",
+   "targetBlank": true
+  }
+ ],
+ "templating": {
+  "list": []
+ },
+ "annotations": {
+  "list": [
+   {
+    "builtIn": 1,
+    "datasource": {
+     "type": "grafana",
+     "uid": "-- Grafana --"
+    },
+    "enable": true,
+    "hide": true,
+    "iconColor": "#f0433f",
+    "name": "Annotations & Alerts",
+    "type": "dashboard"
+   }
+  ]
+ },
  "panels": [
   {
    "id": 1,
-   "type": "stat",
-   "title": "CDC end-to-end freshness",
+   "type": "row",
+   "title": "Freshness and throughput",
+   "collapsed": false,
    "gridPos": {
     "x": 0,
     "y": 0,
+    "w": 24,
+    "h": 1
+   },
+   "panels": [],
+   "targets": []
+  },
+  {
+   "id": 2,
+   "type": "stat",
+   "title": "End-to-end freshness",
+   "gridPos": {
+    "x": 0,
+    "y": 1,
     "w": 6,
     "h": 5
    },
@@ -31,23 +86,23 @@
    "fieldConfig": {
     "defaults": {
      "unit": "s",
+     "color": {
+      "mode": "thresholds"
+     },
      "thresholds": {
       "mode": "absolute",
       "steps": [
        {
-        "color": "green",
+        "color": "#2f9ff0",
         "value": null
        },
        {
-        "color": "orange",
-        "value": 30
-       },
-       {
-        "color": "red",
+        "color": "#f0433f",
         "value": 120
        }
       ]
-     }
+     },
+     "decimals": 1
     },
     "overrides": []
    },
@@ -62,19 +117,27 @@
     "reduceOptions": {
      "calcs": [
       "lastNotNull"
-     ]
+     ],
+     "fields": "",
+     "values": false
     },
     "colorMode": "value",
-    "graphMode": "area"
-   }
+    "graphMode": "area",
+    "textMode": "value",
+    "justifyMode": "auto",
+    "orientation": "auto",
+    "wideLayout": true,
+    "showPercentChange": false
+   },
+   "description": "Age of the newest PostgreSQL heartbeat visible in Iceberg. Alert CdcFreshnessHigh fires above 120 s."
   },
   {
-   "id": 2,
+   "id": 3,
    "type": "stat",
-   "title": "Ingest rate (5 min)",
+   "title": "Ingest rate",
    "gridPos": {
     "x": 6,
-    "y": 0,
+    "y": 1,
     "w": 6,
     "h": 5
    },
@@ -84,16 +147,20 @@
    },
    "fieldConfig": {
     "defaults": {
-     "unit": "ops",
+     "unit": "suffix: rec/s",
+     "color": {
+      "mode": "thresholds"
+     },
      "thresholds": {
       "mode": "absolute",
       "steps": [
        {
-        "color": "blue",
+        "color": "#2f9ff0",
         "value": null
        }
       ]
-     }
+     },
+     "decimals": 1
     },
     "overrides": []
    },
@@ -108,19 +175,27 @@
     "reduceOptions": {
      "calcs": [
       "lastNotNull"
-     ]
+     ],
+     "fields": "",
+     "values": false
     },
     "colorMode": "value",
-    "graphMode": "area"
-   }
+    "graphMode": "area",
+    "textMode": "value",
+    "justifyMode": "auto",
+    "orientation": "auto",
+    "wideLayout": true,
+    "showPercentChange": false
+   },
+   "description": "CDC records merged into Iceberg per second (last 5 minutes)."
   },
   {
-   "id": 3,
+   "id": 4,
    "type": "stat",
-   "title": "Debezium connector",
+   "title": "Last micro-batch",
    "gridPos": {
     "x": 12,
-    "y": 0,
+    "y": 1,
     "w": 6,
     "h": 5
    },
@@ -130,16 +205,348 @@
    },
    "fieldConfig": {
     "defaults": {
-     "unit": "short",
+     "unit": "s",
+     "color": {
+      "mode": "thresholds"
+     },
      "thresholds": {
       "mode": "absolute",
       "steps": [
        {
-        "color": "red",
+        "color": "#2f9ff0",
         "value": null
        },
        {
-        "color": "green",
+        "color": "#f0433f",
+        "value": 600
+       }
+      ]
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "lakehouse_ingest_last_batch_age_seconds",
+     "legendFormat": "age"
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "textMode": "value",
+    "justifyMode": "auto",
+    "orientation": "auto",
+    "wideLayout": true,
+    "showPercentChange": false
+   },
+   "description": "Seconds since the streaming job committed a micro-batch. Alert StreamingStalled fires above 600 s while changes are pending."
+  },
+  {
+   "id": 5,
+   "type": "stat",
+   "title": "Rows in lakehouse",
+   "gridPos": {
+    "x": 18,
+    "y": 1,
+    "w": 6,
+    "h": 5
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "locale",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "#2f9ff0",
+        "value": null
+       }
+      ]
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum(lakehouse_iceberg_rows)",
+     "legendFormat": "rows"
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "textMode": "value",
+    "justifyMode": "auto",
+    "orientation": "auto",
+    "wideLayout": true,
+    "showPercentChange": false
+   },
+   "description": "Rows in the current Iceberg snapshot across all CDC tables."
+  },
+  {
+   "id": 6,
+   "type": "timeseries",
+   "title": "CDC freshness over time",
+   "gridPos": {
+    "x": 0,
+    "y": 6,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#2f9ff0"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineInterpolation": "linear",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "gradientMode": "opacity",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": true,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "dashed"
+      },
+      "axisSoftMax": 150
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "transparent",
+        "value": null
+       },
+       {
+        "color": "#f0433f",
+        "value": 120
+       }
+      ]
+     },
+     "min": 0,
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "lakehouse_cdc_freshness_seconds",
+     "legendFormat": "PostgreSQL commit → visible in Iceberg"
+    }
+   ],
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "description": "Red line: the 120 s CdcFreshnessHigh alert threshold."
+  },
+  {
+   "id": 7,
+   "type": "timeseries",
+   "title": "Ingestion throughput",
+   "gridPos": {
+    "x": 12,
+    "y": 6,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "suffix: /s",
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#2f9ff0"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineInterpolation": "linear",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "gradientMode": "opacity",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": true,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "transparent",
+        "value": null
+       }
+      ]
+     },
+     "min": 0,
+     "decimals": 1
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "source commits/s"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#8a96a6"
+        }
+       },
+       {
+        "id": "custom.fillOpacity",
+        "value": 0
+       },
+       {
+        "id": "custom.lineStyle",
+        "value": {
+         "fill": "dash",
+         "dash": [
+          6,
+          4
+         ]
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "lakehouse_ingest_records_per_second",
+     "legendFormat": "records/s merged"
+    },
+    {
+     "refId": "B",
+     "expr": "rate(lakehouse_source_commits_total[1m])",
+     "legendFormat": "source commits/s"
+    }
+   ],
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 8,
+   "type": "row",
+   "title": "Connector and WAL health",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 14,
+    "w": 24,
+    "h": 1
+   },
+   "panels": [],
+   "targets": []
+  },
+  {
+   "id": 9,
+   "type": "stat",
+   "title": "Debezium connector",
+   "gridPos": {
+    "x": 0,
+    "y": 15,
+    "w": 5,
+    "h": 5
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "#f0433f",
+        "value": null
+       },
+       {
+        "color": "#2f9ff0",
         "value": 1
        }
       ]
@@ -150,11 +557,13 @@
        "options": {
         "0": {
          "text": "DOWN",
-         "color": "red"
+         "color": "#f0433f",
+         "index": 0
         },
         "1": {
          "text": "RUNNING",
-         "color": "green"
+         "color": "#2f9ff0",
+         "index": 1
         }
        }
       }
@@ -173,19 +582,27 @@
     "reduceOptions": {
      "calcs": [
       "lastNotNull"
-     ]
+     ],
+     "fields": "",
+     "values": false
     },
     "colorMode": "value",
-    "graphMode": "area"
-   }
+    "graphMode": "area",
+    "textMode": "value",
+    "justifyMode": "auto",
+    "orientation": "auto",
+    "wideLayout": true,
+    "showPercentChange": false
+   },
+   "description": "1 when the connector and all its tasks are RUNNING. Alert DebeziumConnectorDown."
   },
   {
-   "id": 4,
+   "id": 10,
    "type": "stat",
    "title": "Replication slot lag",
    "gridPos": {
-    "x": 18,
-    "y": 0,
+    "x": 5,
+    "y": 15,
     "w": 6,
     "h": 5
    },
@@ -196,23 +613,23 @@
    "fieldConfig": {
     "defaults": {
      "unit": "bytes",
+     "color": {
+      "mode": "thresholds"
+     },
      "thresholds": {
       "mode": "absolute",
       "steps": [
        {
-        "color": "green",
+        "color": "#2f9ff0",
         "value": null
        },
        {
-        "color": "orange",
-        "value": 104857600
-       },
-       {
-        "color": "red",
+        "color": "#f0433f",
         "value": 536870912
        }
       ]
-     }
+     },
+     "decimals": 1
     },
     "overrides": []
    },
@@ -227,348 +644,28 @@
     "reduceOptions": {
      "calcs": [
       "lastNotNull"
-     ]
+     ],
+     "fields": "",
+     "values": false
     },
     "colorMode": "value",
-    "graphMode": "area"
-   }
-  },
-  {
-   "id": 5,
-   "type": "timeseries",
-   "title": "CDC freshness over time",
-   "gridPos": {
-    "x": 0,
-    "y": 5,
-    "w": 12,
-    "h": 8
+    "graphMode": "area",
+    "textMode": "value",
+    "justifyMode": "auto",
+    "orientation": "auto",
+    "wideLayout": true,
+    "showPercentChange": false
    },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "unit": "s"
-    },
-    "overrides": []
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "expr": "lakehouse_cdc_freshness_seconds",
-     "legendFormat": "PostgreSQL commit \u2192 visible in Iceberg"
-    }
-   ]
-  },
-  {
-   "id": 6,
-   "type": "timeseries",
-   "title": "Ingestion throughput",
-   "gridPos": {
-    "x": 12,
-    "y": 5,
-    "w": 12,
-    "h": 8
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "unit": "ops"
-    },
-    "overrides": []
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "expr": "lakehouse_ingest_records_per_second",
-     "legendFormat": "records/s merged"
-    },
-    {
-     "refId": "B",
-     "expr": "rate(lakehouse_source_commits_total[1m])",
-     "legendFormat": "source commits/s"
-    }
-   ]
-  },
-  {
-   "id": 7,
-   "type": "timeseries",
-   "title": "Live data files per table",
-   "gridPos": {
-    "x": 0,
-    "y": 13,
-    "w": 8,
-    "h": 8
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "unit": "short"
-    },
-    "overrides": []
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "expr": "lakehouse_iceberg_files{content=\"data\"}",
-     "legendFormat": "{{table}}"
-    }
-   ]
-  },
-  {
-   "id": 8,
-   "type": "timeseries",
-   "title": "Live delete files per table (merge-on-read)",
-   "gridPos": {
-    "x": 8,
-    "y": 13,
-    "w": 8,
-    "h": 8
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "unit": "short"
-    },
-    "overrides": []
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "expr": "lakehouse_iceberg_files{content=\"position_deletes\"}",
-     "legendFormat": "{{table}}"
-    }
-   ]
-  },
-  {
-   "id": 9,
-   "type": "timeseries",
-   "title": "Average data file size",
-   "gridPos": {
-    "x": 16,
-    "y": 13,
-    "w": 8,
-    "h": 8
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "unit": "bytes"
-    },
-    "overrides": []
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "expr": "lakehouse_iceberg_avg_data_file_bytes",
-     "legendFormat": "{{table}}"
-    }
-   ]
-  },
-  {
-   "id": 10,
-   "type": "timeseries",
-   "title": "Snapshots retained",
-   "gridPos": {
-    "x": 0,
-    "y": 21,
-    "w": 8,
-    "h": 8
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "unit": "short"
-    },
-    "overrides": []
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "expr": "lakehouse_iceberg_snapshots",
-     "legendFormat": "{{table}}"
-    }
-   ]
+   "description": "WAL retained for Debezium. Alert ReplicationSlotLagHigh fires above 512 MiB."
   },
   {
    "id": 11,
-   "type": "timeseries",
-   "title": "Rows: PostgreSQL vs Iceberg",
-   "gridPos": {
-    "x": 8,
-    "y": 21,
-    "w": 8,
-    "h": 8
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "unit": "short"
-    },
-    "overrides": []
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "expr": "lakehouse_source_rows",
-     "legendFormat": "pg {{table}}"
-    },
-    {
-     "refId": "B",
-     "expr": "lakehouse_iceberg_rows",
-     "legendFormat": "iceberg {{table}}"
-    }
-   ]
-  },
-  {
-   "id": 12,
-   "type": "timeseries",
-   "title": "MERGE duration (latest batch)",
-   "gridPos": {
-    "x": 16,
-    "y": 21,
-    "w": 8,
-    "h": 8
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "unit": "ms"
-    },
-    "overrides": []
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "expr": "lakehouse_ingest_merge_ms",
-     "legendFormat": "{{table}}"
-    }
-   ]
-  },
-  {
-   "id": 13,
-   "type": "timeseries",
-   "title": "Iceberg bytes (live files)",
-   "gridPos": {
-    "x": 0,
-    "y": 29,
-    "w": 8,
-    "h": 8
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "unit": "bytes"
-    },
-    "overrides": []
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "expr": "sum by (table) (lakehouse_iceberg_bytes)",
-     "legendFormat": "{{table}}"
-    }
-   ]
-  },
-  {
-   "id": 14,
-   "type": "timeseries",
-   "title": "MinIO storage (all objects)",
-   "gridPos": {
-    "x": 8,
-    "y": 29,
-    "w": 8,
-    "h": 8
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "unit": "bytes"
-    },
-    "overrides": []
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "expr": "minio_cluster_usage_total_bytes",
-     "legendFormat": "bytes"
-    }
-   ]
-  },
-  {
-   "id": 15,
-   "type": "timeseries",
-   "title": "Spark Structured Streaming (built-in metrics)",
-   "gridPos": {
-    "x": 16,
-    "y": 29,
-    "w": 8,
-    "h": 8
-   },
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "unit": "short"
-    },
-    "overrides": []
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "expr": "metrics_lakehouse_driver_spark_streaming_cdc_to_iceberg_inputRate_total_Value",
-     "legendFormat": "input rows/s"
-    },
-    {
-     "refId": "B",
-     "expr": "metrics_lakehouse_driver_spark_streaming_cdc_to_iceberg_processingRate_total_Value",
-     "legendFormat": "processed rows/s"
-    },
-    {
-     "refId": "C",
-     "expr": "metrics_lakehouse_driver_spark_streaming_cdc_to_iceberg_latency_Value",
-     "legendFormat": "batch latency ms"
-    }
-   ]
-  },
-  {
-   "id": 16,
    "type": "stat",
-   "title": "Exporter sources up",
+   "title": "Replication slot",
    "gridPos": {
-    "x": 0,
-    "y": 37,
-    "w": 24,
+    "x": 11,
+    "y": 15,
+    "w": 4,
     "h": 5
    },
    "datasource": {
@@ -578,15 +675,18 @@
    "fieldConfig": {
     "defaults": {
      "unit": "short",
+     "color": {
+      "mode": "thresholds"
+     },
      "thresholds": {
       "mode": "absolute",
       "steps": [
        {
-        "color": "red",
+        "color": "#f0433f",
         "value": null
        },
        {
-        "color": "green",
+        "color": "#2f9ff0",
         "value": 1
        }
       ]
@@ -597,11 +697,91 @@
        "options": {
         "0": {
          "text": "DOWN",
-         "color": "red"
+         "color": "#f0433f",
+         "index": 0
+        },
+        "1": {
+         "text": "ACTIVE",
+         "color": "#2f9ff0",
+         "index": 1
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "lakehouse_replication_slot_active",
+     "legendFormat": "{{slot}}"
+    }
+   ],
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "area",
+    "textMode": "value",
+    "justifyMode": "auto",
+    "orientation": "auto",
+    "wideLayout": true,
+    "showPercentChange": false
+   },
+   "description": "1 when the pgoutput replication slot is in use by Debezium."
+  },
+  {
+   "id": 12,
+   "type": "stat",
+   "title": "Exporter sources up",
+   "gridPos": {
+    "x": 15,
+    "y": 15,
+    "w": 9,
+    "h": 5
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "#f0433f",
+        "value": null
+       },
+       {
+        "color": "#2f9ff0",
+        "value": 1
+       }
+      ]
+     },
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "DOWN",
+         "color": "#f0433f",
+         "index": 0
         },
         "1": {
          "text": "UP",
-         "color": "green"
+         "color": "#2f9ff0",
+         "index": 1
         }
        }
       }
@@ -620,12 +800,1456 @@
     "reduceOptions": {
      "calcs": [
       "lastNotNull"
-     ]
+     ],
+     "fields": "",
+     "values": false
     },
     "colorMode": "value",
-    "graphMode": "area"
+    "graphMode": "area",
+    "textMode": "value",
+    "justifyMode": "auto",
+    "orientation": "auto",
+    "wideLayout": true,
+    "showPercentChange": false
+   },
+   "description": "1 when the last collection from each source (PostgreSQL, Kafka Connect, Trino) succeeded."
+  },
+  {
+   "id": 13,
+   "type": "timeseries",
+   "title": "Replication slot lag over time",
+   "gridPos": {
+    "x": 0,
+    "y": 20,
+    "w": 8,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bytes",
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#f0433f"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineInterpolation": "linear",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "gradientMode": "opacity",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": true,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "dashed"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "transparent",
+        "value": null
+       },
+       {
+        "color": "#f0433f",
+        "value": 536870912
+       }
+      ]
+     },
+     "min": 0,
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "lakehouse_replication_slot_lag_bytes",
+     "legendFormat": "{{slot}}"
+    }
+   ],
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "description": "WAL bytes not yet confirmed by Debezium. Red line: the 512 MiB ReplicationSlotLagHigh threshold."
+  },
+  {
+   "id": 14,
+   "type": "timeseries",
+   "title": "Spark Structured Streaming",
+   "gridPos": {
+    "x": 8,
+    "y": 20,
+    "w": 8,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "suffix: /s",
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#2f9ff0"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineInterpolation": "linear",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "gradientMode": "opacity",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": true,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "transparent",
+        "value": null
+       }
+      ]
+     },
+     "min": 0,
+     "decimals": 1
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "processed rows/s"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#7dd3ff"
+        }
+       },
+       {
+        "id": "custom.fillOpacity",
+        "value": 0
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "batch latency"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#8a96a6"
+        }
+       },
+       {
+        "id": "unit",
+        "value": "ms"
+       },
+       {
+        "id": "custom.axisPlacement",
+        "value": "right"
+       },
+       {
+        "id": "custom.fillOpacity",
+        "value": 0
+       },
+       {
+        "id": "custom.lineStyle",
+        "value": {
+         "fill": "dash",
+         "dash": [
+          6,
+          4
+         ]
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "metrics_lakehouse_driver_spark_streaming_cdc_to_iceberg_inputRate_total_Value",
+     "legendFormat": "input rows/s"
+    },
+    {
+     "refId": "B",
+     "expr": "metrics_lakehouse_driver_spark_streaming_cdc_to_iceberg_processingRate_total_Value",
+     "legendFormat": "processed rows/s"
+    },
+    {
+     "refId": "C",
+     "expr": "metrics_lakehouse_driver_spark_streaming_cdc_to_iceberg_latency_Value",
+     "legendFormat": "batch latency"
+    }
+   ],
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "description": "Built-in Spark driver metrics for the cdc_to_iceberg query. Batch latency (ms) on the right axis."
+  },
+  {
+   "id": 15,
+   "type": "timeseries",
+   "title": "MERGE duration (latest batch)",
+   "gridPos": {
+    "x": 16,
+    "y": 20,
+    "w": 8,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ms",
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#2f9ff0"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineInterpolation": "linear",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "gradientMode": "opacity",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": true,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "transparent",
+        "value": null
+       }
+      ]
+     },
+     "min": 0
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?orders$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#2f9ff0"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?customer$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#7dd3ff"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?nation$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#1877c4"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?region$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#8a96a6"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?cdc_probe$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#c9d3de"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "lakehouse_ingest_merge_ms",
+     "legendFormat": "{{table}}"
+    }
+   ],
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "description": "Duration of the Iceberg MERGE INTO for each table in the latest micro-batch."
+  },
+  {
+   "id": 16,
+   "type": "row",
+   "title": "File health per table",
+   "collapsed": false,
+   "gridPos": {
+    "x": 0,
+    "y": 28,
+    "w": 24,
+    "h": 1
+   },
+   "panels": [],
+   "targets": []
+  },
+  {
+   "id": 17,
+   "type": "timeseries",
+   "title": "Live data files",
+   "gridPos": {
+    "x": 0,
+    "y": 29,
+    "w": 8,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#2f9ff0"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineInterpolation": "linear",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "gradientMode": "opacity",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": true,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "dashed"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "transparent",
+        "value": null
+       },
+       {
+        "color": "#f0433f",
+        "value": 500
+       }
+      ]
+     },
+     "min": 0,
+     "decimals": 0
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?orders$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#2f9ff0"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?customer$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#7dd3ff"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?nation$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#1877c4"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?region$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#8a96a6"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?cdc_probe$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#c9d3de"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "lakehouse_iceberg_files{content=\"data\"}",
+     "legendFormat": "{{table}}"
+    }
+   ],
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "description": "Data files in the current snapshot. Red line: the 500-file SmallFilesAccumulating threshold."
+  },
+  {
+   "id": 18,
+   "type": "timeseries",
+   "title": "Live delete files (merge-on-read)",
+   "gridPos": {
+    "x": 8,
+    "y": 29,
+    "w": 8,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#f0433f"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineInterpolation": "linear",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "gradientMode": "opacity",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": true,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "transparent",
+        "value": null
+       }
+      ]
+     },
+     "min": 0,
+     "decimals": 0
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?orders$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#f0433f"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?customer$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#ff6b6b"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?nation$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#b42318"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?region$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#ffb8b8"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?cdc_probe$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#8a96a6"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "lakehouse_iceberg_files{content=\"position_deletes\"}",
+     "legendFormat": "{{table}}"
+    }
+   ],
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "description": "Position-delete files waiting to be compacted by the iceberg_maintenance DAG."
+  },
+  {
+   "id": 19,
+   "type": "timeseries",
+   "title": "Average data file size",
+   "gridPos": {
+    "x": 16,
+    "y": 29,
+    "w": 8,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bytes",
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#2f9ff0"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineInterpolation": "linear",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "gradientMode": "opacity",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": true,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "dashed"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "transparent",
+        "value": null
+       },
+       {
+        "color": "#f0433f",
+        "value": 8388608
+       }
+      ]
+     },
+     "min": 0,
+     "decimals": 1
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?orders$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#2f9ff0"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?customer$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#7dd3ff"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?nation$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#1877c4"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?region$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#8a96a6"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?cdc_probe$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#c9d3de"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "lakehouse_iceberg_avg_data_file_bytes",
+     "legendFormat": "{{table}}"
+    }
+   ],
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "description": "Red line: 8 MiB. Files smaller than this (with more than 500 of them) trigger SmallFilesAccumulating."
+  },
+  {
+   "id": 20,
+   "type": "timeseries",
+   "title": "Rows: PostgreSQL vs Iceberg",
+   "gridPos": {
+    "x": 0,
+    "y": 37,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "locale",
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#2f9ff0"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineInterpolation": "linear",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "gradientMode": "opacity",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": true,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "transparent",
+        "value": null
+       }
+      ]
+     },
+     "min": 0,
+     "decimals": 0
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^iceberg ([^ ]*\\.)?orders$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#2f9ff0"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^iceberg ([^ ]*\\.)?customer$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#7dd3ff"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^iceberg ([^ ]*\\.)?nation$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#1877c4"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^iceberg ([^ ]*\\.)?region$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#8a96a6"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^iceberg ([^ ]*\\.)?cdc_probe$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#c9d3de"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^pg /"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#8a96a6"
+        }
+       },
+       {
+        "id": "custom.fillOpacity",
+        "value": 0
+       },
+       {
+        "id": "custom.lineStyle",
+        "value": {
+         "fill": "dash",
+         "dash": [
+          6,
+          4
+         ]
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "lakehouse_source_rows",
+     "legendFormat": "pg {{table}}"
+    },
+    {
+     "refId": "B",
+     "expr": "lakehouse_iceberg_rows",
+     "legendFormat": "iceberg {{table}}"
+    }
+   ],
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "description": "Solid blue: rows in the Iceberg snapshot. Dashed grey: pg_stat row estimate in PostgreSQL."
+  },
+  {
+   "id": 21,
+   "type": "timeseries",
+   "title": "Snapshots retained",
+   "gridPos": {
+    "x": 12,
+    "y": 37,
+    "w": 12,
+    "h": 8
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#2f9ff0"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineInterpolation": "linear",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "gradientMode": "opacity",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": true,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "transparent",
+        "value": null
+       }
+      ]
+     },
+     "min": 0,
+     "decimals": 0
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?orders$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#2f9ff0"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?customer$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#7dd3ff"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?nation$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#1877c4"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?region$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#8a96a6"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?cdc_probe$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#c9d3de"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "lakehouse_iceberg_snapshots",
+     "legendFormat": "{{table}}"
+    }
+   ],
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "description": "Snapshots kept in table metadata; expired by the iceberg_maintenance DAG."
+  },
+  {
+   "id": 22,
+   "type": "timeseries",
+   "title": "Iceberg bytes (live files)",
+   "gridPos": {
+    "x": 0,
+    "y": 45,
+    "w": 12,
+    "h": 7
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bytes",
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#2f9ff0"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineInterpolation": "linear",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "gradientMode": "opacity",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": true,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "transparent",
+        "value": null
+       }
+      ]
+     },
+     "min": 0,
+     "decimals": 1
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?orders$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#2f9ff0"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?customer$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#7dd3ff"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?nation$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#1877c4"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?region$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#8a96a6"
+        }
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byRegexp",
+       "options": "/^([^ ]*\\.)?cdc_probe$/"
+      },
+      "properties": [
+       {
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "#c9d3de"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum by (table) (lakehouse_iceberg_bytes)",
+     "legendFormat": "{{table}}"
+    }
+   ],
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
    }
+  },
+  {
+   "id": 23,
+   "type": "timeseries",
+   "title": "MinIO storage (all objects)",
+   "gridPos": {
+    "x": 12,
+    "y": 45,
+    "w": 12,
+    "h": 7
+   },
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bytes",
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#2f9ff0"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineInterpolation": "linear",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "gradientMode": "opacity",
+      "showPoints": "never",
+      "pointSize": 4,
+      "spanNulls": true,
+      "axisPlacement": "auto",
+      "axisBorderShow": false,
+      "scaleDistribution": {
+       "type": "linear"
+      },
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "thresholdsStyle": {
+       "mode": "off"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "transparent",
+        "value": null
+       }
+      ]
+     },
+     "min": 0,
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "minio_cluster_usage_total_bytes",
+     "legendFormat": "bytes"
+    }
+   ],
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true,
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "description": "Total object bytes in MinIO, including snapshots not yet expired and orphan files."
   }
- ],
- "timezone": "browser"
+ ]
 }
