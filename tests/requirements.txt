@@ -1,5 +1,8 @@
 # Host-side test dependencies (the containers get the same pins from config/docker).
+#   pip install -r tests/requirements.txt && pip install pyspark==3.5.6
+# pyspark is installed in a second call on purpose: Airflow's constraints file pins
+# pyspark 3.5.4, while the images run Spark 3.5.6 from the base image (not from pip).
+# The Spark test (tests/unit/test_cdc_type_mapping.py) also needs Java 17 on PATH.
 -r ../config/docker/requirements-tools.txt
 -c ../config/docker/constraints-airflow-2.10.5-py3.10.txt
-pyspark==3.5.6   # tests/unit/test_cdc_type_mapping.py; needs Java 17 on PATH
 pytest

@@ -100,7 +100,7 @@ The console has a light and a dark mode (toggle in the header, or `?theme=dark` 
 | `make maintenance-now` | Run the hourly maintenance job once, right now |
 | `make console` | Open the Floe Console in the browser |
 | `make trino` / `make psql` / `make logs` | CLIs and logs |
-| `make test` / `make test-integration` | Unit tests (`pip install -r tests/requirements.txt`, Java 17 for the Spark test) / the ~15 min full-pipeline test |
+| `make test` / `make test-integration` | Unit tests (`pip install -r tests/requirements.txt && pip install pyspark==3.5.6`, Java 17 for the Spark test) / the ~15 min full-pipeline test |
 
 ## Deliverables
 

@@ -30,8 +30,10 @@ jobs:
             config/docker/constraints-airflow-2.10.5-py3.10.txt
       - uses: actions/setup-java@v4
         with: {distribution: temurin, java-version: "17"}
-      - name: Install dependencies (same pins as the images)
-        run: pip install ruff -r tests/requirements.txt
+      - name: Install dependencies (same pins as the images; pyspark outside Airflow's constraints)
+        run: |
+          pip install ruff -r tests/requirements.txt
+          pip install pyspark==3.5.6
       - name: Lint (ruff)
         run: ruff check src tests docs/report/latex
       - name: Compile all Python

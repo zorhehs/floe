@@ -87,7 +87,7 @@ psql: ## Interactive psql on the source database
 logs: ## Follow the Spark streaming job logs
 	$(DC) logs -f spark-streaming
 
-test: ## Unit tests (pip install -r tests/requirements.txt; the Spark test also needs Java 17)
+test: ## Unit tests (pip install -r tests/requirements.txt && pip install pyspark==3.5.6; Java 17 for the Spark test)
 	python3 -m pytest -q tests/unit
 
 test-integration: ## Full pipeline integration test (~15 min; leaves the stack running with a re-laid-out orders table)
