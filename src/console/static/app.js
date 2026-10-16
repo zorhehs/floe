@@ -403,6 +403,72 @@ function stackChart(host, batches, opts = {}) {
     svgEl);
 }
 
+// snapshot timeline: added / deleted records per Iceberg snapshot, oldest first
+function snapshotChart(host, snaps, opts = {}) {
+  host.replaceChildren();
+  host.classList.add("chart-host");
+  const rows = [...(snaps || [])].reverse().map((snap) => ({
+    snap, ins: Number(snap.added_records) || 0, del: Number(snap.deleted_records) || 0, pd: Number(snap.added_position_deletes) || 0 }));
+  if (rows.length < 2) return;
+  const W = Math.max(320, Math.round(host.clientWidth || 600)), H = 130, L = 44, R = 8, T = 10, B = 20;
+  const totals = rows.map((r) => r.ins + r.del).sort((a, b) => a - b);
+  const p90 = totals[Math.floor(totals.length * 0.9)];
+  let top = totals[totals.length - 1];
+  if (p90 > 0 && top > p90 * 4) top = p90 * 2.2; // the initial load must not flatten the micro-batch snapshots
+  const max = niceMax(Math.max(1, top));
+  const slot = (W - L - R) / rows.length, bw = Math.max(3, Math.min(22, slot - 4));
+  const y = (v) => T + (1 - Math.min(v, max) / max) * (H - T - B);
+  const timeOf = (v) => { const d = fmt.date(v); return d ? d.toLocaleTimeString("en-GB", { hour12: false }) : "—"; };
+  const svgEl = s("svg", { class: "stack-chart", viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "img", "aria-label": "Records added and deleted per snapshot" });
+  for (let i = 0; i <= 2; i++) {
+    const v = (max / 2) * i;
+    svgEl.append(s("line", { class: "grid-line", x1: L, x2: W - R, y1: y(v), y2: y(v) }));
+    svgEl.append(s("text", { class: "axis", x: L - 8, y: y(v) + 3.5, "text-anchor": "end" }, fmt.int(v)));
+  }
+  const tip = h("div", { class: "chart-tip", hidden: true });
+  const every = Math.ceil(rows.length / 6);
+  rows.forEach((r, i) => {
+    const x0 = L + slot * i, cx = x0 + slot / 2 - bw / 2;
+    const selected = !!(opts.selected && opts.selected(r.snap));
+    const g = s("g", { class: `col ${selected ? "selected" : ""}` });
+    if (selected) g.append(s("rect", { class: "sel", x: x0 + 1, y: T - 4, width: slot - 2, height: H - T - B + 6, rx: 4 }));
+    g.append(s("rect", { class: "hit", x: x0, y: 0, width: slot, height: H }));
+    let acc = 0;
+    for (const k of ["ins", "del"]) {
+      if (!r[k]) continue;
+      const y1 = y(acc + r[k]), y2 = y(acc);
+      g.append(s("rect", { class: k, x: cx, y: y1, width: bw, height: Math.max(1, y2 - y1 - (acc ? 1.5 : 0)), rx: 2 }));
+      acc += r[k];
+    }
+    if (acc > max) g.append(s("path", { class: "del", d: `M${cx + bw / 2 - 4},${T + 6}L${cx + bw / 2 + 4},${T + 6}L${cx + bw / 2},${T - 1}Z` }));
+    if (r.pd > 0) g.append(s("rect", { class: "pd", x: cx - 2, y: y(r.pd) - 1.25, width: bw + 4, height: 2.5, rx: 1 }));
+    if (i === 0 || i === rows.length - 1 || i % every === 0) {
+      svgEl.append(s("text", { class: "axis", x: x0 + slot / 2, y: H - 5, "text-anchor": i === 0 ? "start" : i === rows.length - 1 ? "end" : "middle" }, timeOf(r.snap.committed_at)));
+    }
+    g.addEventListener("mouseenter", () => {
+      const rect = svgEl.getBoundingClientRect(), hostRect = host.getBoundingClientRect();
+      const parts = [`${fmt.int(r.ins)} added`, `${fmt.int(r.del)} deleted`];
+      if (r.pd) parts.push(`${fmt.int(r.pd)} position deletes`);
+      tip.replaceChildren(h("b", { text: parts.join(" · ") }),
+        h("small", { text: `${r.snap.operation} · ${fmt.datetime(r.snap.committed_at)}` }),
+        h("small", { text: `snapshot ${r.snap.snapshot_id}` }));
+      tip.hidden = false;
+      const half = tip.offsetWidth / 2 + 4;
+      tip.style.top = `${rect.top - hostRect.top + 2}px`;
+      tip.style.left = `${Math.max(half, Math.min(rect.width - half, (x0 + slot / 2) * (rect.width / W)))}px`;
+    });
+    g.addEventListener("mouseleave", () => { tip.hidden = true; });
+    if (opts.onSelect) g.addEventListener("click", () => opts.onSelect(r.snap));
+    svgEl.append(g);
+  });
+  host.append(
+    h("div", { class: "legend-row" },
+      h("span", {}, h("i", { style: "background:var(--accent-strong)" }), "added records"),
+      h("span", {}, h("i", { style: "background:var(--alert)" }), "deleted records"),
+      h("span", {}, h("i", { style: "background:var(--alert-strong);height:3px;vertical-align:3px" }), "position deletes")),
+    svgEl, tip);
+}
+
 // ------------------------------------------------------------------ router
 const ROUTES = {
   overview: { eyebrow: "01 · Operate", title: "Overview", sub: "Health, freshness and throughput of the CDC pipeline", render: viewOverview },
@@ -1014,15 +1080,20 @@ async function viewTimeTravel(view, ctx, params) {
   const tableSel = h("select", { class: "input", "aria-label": "Table" }, lake.map((t) => h("option", { value: t.table, text: `shop.${t.table}`, selected: t.table === table })));
   tableSel.addEventListener("change", () => { table = tableSel.value; selectedSnap = null; history.replaceState(null, "", `#/time-travel?table=${table}`); loadSnaps(); detailHost.replaceChildren(placeholder()); rowHost.replaceChildren(); keyInput.value = ""; });
   const snapsHost = h("div");
+  const chartHost = h("div");
   const detailHost = h("div");
   const placeholder = () => h("div", { class: "empty", text: "Select a snapshot to compare it with the current table." });
   detailHost.append(placeholder());
   const keyInput = h("input", { class: "input", inputmode: "numeric", placeholder: "primary key", "aria-label": "Primary key" });
   const rowHost = h("div");
 
+  const isSelected = (r) => selectedSnap && r.snapshot_id === selectedSnap.snapshot_id;
+  function select(r) { selectedSnap = r; loadSnaps(); showSnapshot(r); }
+
   async function loadSnaps() {
     const data = await api(`/api/tables/${table}/snapshots`);
-    snapsHost.replaceChildren(dataTable([
+    snapshotChart(chartHost, data.snapshots, { selected: isSelected, onSelect: select });
+    snapsHost.replaceChildren(chartHost, dataTable([
       { label: "Committed", render: (r) => fmt.datetime(r.committed_at) },
       { label: "Snapshot", mono: true, render: (r) => fmt.short(r.snapshot_id) },
       { label: "Operation", render: (r) => chip(r.operation, { append: "ok", overwrite: "accent", replace: "", delete: "bad" }[r.operation]) },
@@ -1030,7 +1101,7 @@ async function viewTimeTravel(view, ctx, params) {
       { label: "Pos. deletes", num: true, render: (r) => fmt.int(r.added_position_deletes) },
       { label: "Records in data files", num: true, render: (r) => fmt.int(r.total_records) },
       { label: "Files", num: true, render: (r) => `${fmt.int(r.total_data_files)} + ${fmt.int(r.total_delete_files)}` },
-    ], data.snapshots, { tall: true, onRow: (r) => { selectedSnap = r; loadSnaps(); showSnapshot(r); }, selected: (r) => selectedSnap && r.snapshot_id === selectedSnap.snapshot_id }));
+    ], data.snapshots, { tall: true, onRow: select, selected: isSelected }));
   }
 
   async function showSnapshot(snap) {
