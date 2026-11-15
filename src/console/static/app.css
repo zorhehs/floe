@@ -133,8 +133,10 @@ code, .mono { font-family: var(--mono); font-size: 12.5px; }
 .hero-dots i { width: 7px; height: 4px; border-radius: 2px; background: currentColor; opacity: 0.25; transition: width 0.3s, opacity 0.3s; }
 .hero-dots i.on { width: 26px; opacity: 0.85; }
 
-.view { padding: 4px var(--gutter) 40px; display: flex; flex-direction: column; gap: 16px; }
-.view > div:empty { display: none; }
+.view { padding: 4px var(--gutter) 40px; }
+/* every page renders into one .page container: it carries the vertical rhythm between cards */
+.page { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.page > div:empty { display: none; }
 
 .footer {
   display: flex; flex-wrap: wrap; align-items: center; gap: 8px 22px;
@@ -145,7 +147,6 @@ code, .mono { font-family: var(--mono); font-size: 12.5px; }
 .footer a { text-decoration: none; color: var(--text-2); }
 .footer a:hover { color: var(--text); }
 .footer a span { color: var(--text-3); font-size: 12px; }
-.footer .credit { margin-left: auto; }
 
 /* ------------------------------------------------------------------ primitives */
 .card { background: var(--surface); border-radius: var(--radius); padding: 26px 28px; min-width: 0; }
@@ -230,23 +231,42 @@ table.data td.wrap { white-space: normal; }
 
 /* ------------------------------------------------------------------ overview */
 .flow-caption { display: flex; justify-content: space-between; font-size: 12.5px; color: var(--text-3); margin: 18px 0 10px; }
-.flow { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); align-items: stretch; counter-reset: stage; }
+.flow { position: relative; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 28px; align-items: stretch; counter-reset: stage; }
 .node {
   position: relative; display: flex; flex-direction: column; gap: 3px; min-width: 0;
   padding: 16px; background: var(--surface-2); border-radius: 16px;
 }
 .flow .node { counter-increment: stage; }
 .flow .node::after { content: counter(stage, decimal-leading-zero); position: absolute; right: 14px; top: 16px; font-size: 12px; color: var(--text-3); }
-.flow .node + .node { margin-left: 28px; }
-.flow .node + .node::before {
-  content: ""; position: absolute; left: -29px; top: 50%; width: 28px; height: 2px;
-  background: repeating-linear-gradient(90deg, var(--tick) 0 4px, transparent 4px 8px);
+.flow > .node { z-index: 1; }
+
+/* The change data path: one route measured from the stage boxes (straight in a row, an elbow
+   back into the next row when the grid wraps), drawn behind them so it shows in the gaps.
+   Events travel it at a constant speed; each stage glows as an event passes through it. */
+.flow-links { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; z-index: 0; }
+.flow-links path { fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.flow-links .track { stroke: var(--line-2); stroke-dasharray: 2 7; }
+.flow.live .flow-links .track { stroke: var(--accent); stroke-dasharray: none; opacity: 0.55; }
+.flow-links .broken { stroke: var(--alert); stroke-dasharray: 5 6; opacity: 1; }
+.flow-packet {
+  position: absolute; left: 0; top: 0; z-index: 0; pointer-events: none;
+  width: 38px; height: 4px; border-radius: 2px;
+  offset-rotate: auto; offset-anchor: 100% 50%;
+  background: linear-gradient(90deg, transparent, var(--accent-strong));
+  animation: flow-run var(--run) linear var(--delay) infinite;
 }
-.flow.live .node + .node::before {
-  background: repeating-linear-gradient(90deg, var(--accent-strong) 0 4px, transparent 4px 10px);
-  background-size: 20px 2px; animation: flow 0.9s linear infinite;
+.flow-packet::after {
+  content: ""; position: absolute; right: -4px; top: -3px; width: 10px; height: 10px; border-radius: 50%;
+  background: var(--accent-strong);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 30%, transparent), 0 0 16px var(--accent);
 }
-@keyframes flow { to { background-position: 20px 0; } }
+@keyframes flow-run { from { offset-distance: 0%; } to { offset-distance: 100%; } }
+.flow.live > .node { animation: stage-glow var(--period) ease-out var(--pulse-delay) infinite; }
+@keyframes stage-glow {
+  0% { box-shadow: 0 0 0 0 transparent; }
+  10% { box-shadow: 0 0 0 2px var(--accent), 0 10px 28px -12px var(--accent-strong); }
+  55%, 100% { box-shadow: 0 0 0 0 transparent; }
+}
 .node-top { display: flex; align-items: center; gap: 8px; padding-right: 22px; }
 .node-name { font-weight: 500; font-size: 15px; }
 .node-role { font-size: 12px; color: var(--text-3); }
@@ -406,7 +426,7 @@ kbd { font: 11px var(--mono); padding: 1px 6px; border-radius: 6px; border: 1px 
 .alert-top .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .alert-top .chip { margin-left: auto; }
 .alert p { margin: 0; font-size: 12.5px; color: var(--text-2); }
-.alert code { display: block; font-size: 11px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.alert .alert-now { margin-top: auto; padding-top: 4px; font-size: 12px; color: var(--text-3); }
 
 /* ------------------------------------------------------------------ gdpr */
 .subject { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 16px; padding: 16px 18px; background: var(--surface-2); border-radius: var(--radius-sm); }
@@ -481,16 +501,15 @@ body, .header, .footer, .card, .kpi, .node, .pill, .btn, .input, .editor, .seg, 
 @keyframes draw { to { stroke-dashoffset: 0; } }
 @keyframes grow { from { transform: scaleY(0); } }
 @keyframes ring { from { transform: scale(1); opacity: 0.6; } to { transform: scale(3.2); opacity: 0; } }
-@keyframes packet { 0% { transform: translateX(0); opacity: 0; } 15% { opacity: 1; } 85% { opacity: 1; } 100% { transform: translateX(24px); opacity: 0; } }
 @keyframes tick { 0% { color: var(--accent-ink); transform: translateY(-2px); } 100% { color: inherit; transform: none; } }
 @keyframes hero-in { from { opacity: 0; transform: translateY(8px); } }
 
-.view.fresh > * { animation: rise 0.55s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
-.view.fresh > *:nth-child(2) { animation-delay: 0.06s; }
-.view.fresh > *:nth-child(3) { animation-delay: 0.12s; }
-.view.fresh > *:nth-child(4) { animation-delay: 0.18s; }
-.view.fresh > *:nth-child(5) { animation-delay: 0.24s; }
-.view.fresh > *:nth-child(n + 6) { animation-delay: 0.3s; }
+.view.fresh > .page > * { animation: rise 0.55s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.view.fresh > .page > *:nth-child(2) { animation-delay: 0.06s; }
+.view.fresh > .page > *:nth-child(3) { animation-delay: 0.12s; }
+.view.fresh > .page > *:nth-child(4) { animation-delay: 0.18s; }
+.view.fresh > .page > *:nth-child(5) { animation-delay: 0.24s; }
+.view.fresh > .page > *:nth-child(n + 6) { animation-delay: 0.3s; }
 .view.fresh .kpis > .kpi { animation: rise 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
 .view.fresh .kpis > .kpi:nth-child(2) { animation-delay: 0.07s; }
 .view.fresh .kpis > .kpi:nth-child(3) { animation-delay: 0.14s; }
@@ -517,12 +536,6 @@ body, .header, .footer, .card, .kpi, .node, .pill, .btn, .input, .editor, .seg, 
 .hero .hero-text { animation: hero-in 0.45s ease-out both; }
 .kpi-value.tick { animation: tick 0.7s ease-out; }
 .kpi-value { transition: color 0.3s; }
-.packet { position: absolute; left: -29px; top: calc(50% - 3px); width: 6px; height: 6px; border-radius: 50%; background: var(--alert); opacity: 0; }
-.flow.live .node + .node .packet { animation: packet 1.3s linear infinite; }
-.flow.live .node:nth-child(3) .packet { animation-delay: 0.25s; }
-.flow.live .node:nth-child(4) .packet { animation-delay: 0.5s; }
-.flow.live .node:nth-child(5) .packet { animation-delay: 0.75s; }
-.flow.live .node:nth-child(6) .packet { animation-delay: 1s; }
 .btn:not([disabled]):hover, .pill:hover, .theme-toggle:hover { transform: translateY(-1px); }
 .btn:not([disabled]):active, .pill:active { transform: translateY(0) scale(0.98); }
 .tcard:hover, .run:hover { transform: translateY(-2px); }
@@ -538,9 +551,7 @@ body, .header, .footer, .card, .kpi, .node, .pill, .btn, .input, .editor, .seg, 
 @media (max-width: 1360px) {
   .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .alerts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .flow { grid-template-columns: repeat(3, minmax(0, 1fr)); row-gap: 14px; }
-  .flow .node:nth-child(3n + 1) { margin-left: 0; }
-  .flow .node:nth-child(3n + 1)::before { display: none; }
+  .flow { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 @media (max-width: 1180px) {
   .split, .split-r, .cols-2, .cols-3, .sql-layout { grid-template-columns: minmax(0, 1fr); }
@@ -561,14 +572,12 @@ body, .header, .footer, .card, .kpi, .node, .pill, .btn, .input, .editor, .seg, 
   .alerts, .subject, .pair-stat { grid-template-columns: minmax(0, 1fr); }
   .theme-toggle { margin-left: 0; }
   .kpi-value { font-size: 42px; }
-  .flow { grid-template-columns: minmax(0, 1fr); }
-  .flow .node { margin-left: 0 !important; }
-  .flow .node::before { display: none; }
+  .flow { grid-template-columns: minmax(0, 1fr); gap: 18px; }
   .bars .q { grid-template-columns: 110px minmax(0, 1fr) 56px; }
   .latency b { font-size: 56px; }
-  .footer .credit { margin-left: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
+  .flow-packet { display: none; }
   *, *::before, *::after { animation: none !important; transition: none !important; }
   .view.fresh .chart .line, .view.fresh .spark .line { stroke-dasharray: none; stroke-dashoffset: 0; }
 }

@@ -526,6 +526,7 @@ function makeContext() {
   const timers = [];
   const listeners = [];
   const ticks = [];
+  const cleanups = [];
   const c = {
     alive: true,
     every(ms, fn) {
@@ -546,8 +547,10 @@ function makeContext() {
     close() {
       c.alive = false;
       timers.forEach(clearInterval);
+      cleanups.forEach((fn) => fn());
       listeners.forEach(([t, e, f]) => t.removeEventListener(e, f));
     },
+    cleanup(fn) { cleanups.push(fn); },
   };
   return c;
 }
@@ -583,12 +586,93 @@ const MAIN_FLOW = ["postgres", "debezium", "kafka", "spark", "iceberg", "trino"]
 const SIDE = ["minio", "airflow", "prometheus", "grafana"];
 
 function nodeEl(c) {
-  return h("div", { class: `node ${c.ok ? "" : "bad"}` },
-    h("i", { class: "packet", "aria-hidden": "true" }),
+  return h("div", { class: `node ${c.ok ? "" : "bad"}`, "data-id": c.id },
     h("div", { class: "node-top" }, dot(c.ok ? "ok" : "bad"), h("span", { class: "node-name", text: c.name }),
       c.link ? h("a", { class: "open", href: c.link, target: "_blank", rel: "noopener", title: `Open the ${c.name} UI`, "aria-label": `Open the ${c.name} UI` }, icon("external", 13)) : null),
     h("div", { class: "node-role", text: c.role }),
     h("div", { class: "node-detail", text: c.detail, title: c.detail }));
+}
+
+// Refresh the stage cards in place: rebuilding them every poll would restart their animations.
+function updateNodes(host, components) {
+  const current = [...host.children].filter((n) => n.classList.contains("node"));
+  const same = current.length === components.length && current.every((n, i) => n.dataset.id === components[i].id);
+  if (!same) { host.replaceChildren(...components.map(nodeEl)); return; }
+  current.forEach((n, i) => {
+    const fresh = nodeEl(components[i]);
+    n.className = fresh.className;
+    n.replaceChildren(...fresh.childNodes);
+  });
+}
+
+const FLOW_SPEED = 90;      // px/s an event travels along the route (deliberately unhurried)
+const FLOW_SPACING = 420;   // px between two events on the route
+
+// Draw the change data path behind the stage cards and, while changes are flowing, send events
+// along it. Geometry comes from the rendered cards, so the route follows any grid: a row, a row
+// that wraps (an elbow back through the gap), or a single column.
+function drawFlowLinks(flow) {
+  const nodes = [...flow.children].filter((n) => n.classList.contains("node"));
+  const live = flow.classList.contains("live");
+  const box = flow.getBoundingClientRect();
+  const pts = nodes.map((n) => {
+    const r = n.getBoundingClientRect();
+    return { x: r.left - box.left + r.width / 2, y: r.top - box.top + r.height / 2,
+      top: r.top - box.top, bottom: r.bottom - box.top, bad: n.classList.contains("bad") };
+  });
+  const key = JSON.stringify([live, pts.map((p) => [Math.round(p.x), Math.round(p.y), p.bad])]);
+  if (flow.dataset.linksKey === key) return;   // nothing moved: keep the running animation
+  flow.dataset.linksKey = key;
+  flow.querySelectorAll(":scope > .flow-links, :scope > .flow-packet").forEach((e) => e.remove());
+  if (pts.length < 2 || !box.width) return;
+
+  const pieces = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i], b = pts[i + 1];
+    if (Math.abs(a.y - b.y) < 4 || Math.abs(a.x - b.x) < 4) {
+      pieces.push(`L${b.x},${b.y}`);
+    } else {                                     // next row: down into the gap, across, down
+      const ym = (a.bottom + b.top) / 2;
+      const r = Math.max(0, Math.min(14, Math.abs(b.x - a.x) / 2, (b.top - a.bottom) / 2));
+      const dir = b.x < a.x ? -1 : 1;
+      pieces.push(`L${a.x},${ym - r} Q${a.x},${ym} ${a.x + dir * r},${ym} L${b.x - dir * r},${ym} Q${b.x},${ym} ${b.x},${ym + r} L${b.x},${b.y}`);
+    }
+  }
+  const svgEl = s("svg", { class: "flow-links", "aria-hidden": "true" });
+  const segs = pieces.map((piece, i) => {
+    const el = s("path", { class: pts[i].bad || pts[i + 1].bad ? "track broken" : "track", d: `M${pts[i].x},${pts[i].y} ${piece}` });
+    svgEl.append(el);
+    return el;
+  });
+  flow.prepend(svgEl);
+
+  const broken = pts.some((p) => p.bad);
+  if (!live || broken || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const lengths = segs.map((el) => el.getTotalLength());
+  const total = lengths.reduce((a, b) => a + b, 0);
+  const run = total / FLOW_SPEED;
+  const count = Math.max(1, Math.round(total / FLOW_SPACING));
+  const period = run / count;
+  const route = `path("M${pts[0].x},${pts[0].y} ${pieces.join(" ")}")`;
+  for (let i = 0; i < count; i++) {
+    const packet = h("i", { class: "flow-packet", "aria-hidden": "true" });
+    packet.style.offsetPath = route;
+    packet.style.setProperty("--run", `${run.toFixed(3)}s`);
+    packet.style.setProperty("--delay", `${(-i * period).toFixed(3)}s`);
+    flow.prepend(packet);
+  }
+  // each stage glows when an event reaches its centre (glow peaks 10 % into its cycle)
+  let travelled = 0;
+  nodes.forEach((n, k) => {
+    if (k > 0) travelled += lengths[k - 1];
+    const arrive = travelled / FLOW_SPEED;
+    const delay = (((arrive - 0.1 * period) % period) + period) % period - period;
+    n.style.setProperty("--period", `${period.toFixed(3)}s`);
+    n.style.setProperty("--pulse-delay", `${delay.toFixed(3)}s`);
+    n.style.animation = "none";                  // restart so glows and events share one clock
+    void n.offsetWidth;
+    n.style.animation = "";
+  });
 }
 
 function kpi(label, value, unit, note, kind, fraction, opts = {}) {
@@ -637,6 +721,58 @@ function setHero(items) {
   }
 }
 
+// Prometheus alert rules (config/monitoring/alerts.yml) explained in plain words. The rule name
+// and its PromQL stay available as a tooltip for whoever wants the technical detail.
+const HEALTH_CHECKS = {
+  CdcFreshnessHigh: {
+    title: "Data is up to date",
+    good: "Changes made in PostgreSQL show up in the lakehouse within seconds.",
+    bad: "Changes are taking more than 2 minutes to reach the lakehouse.",
+    now: (m) => (m && m.freshness_s != null ? `${fmt.secs(m.freshness_s)} behind right now · limit 2 min` : null),
+  },
+  DebeziumConnectorDown: {
+    title: "Changes are being captured",
+    good: "Every insert, update and delete in PostgreSQL is picked up.",
+    bad: "Database changes are not being picked up - check Debezium.",
+    now: () => {
+      const c = globalState.status && globalState.status.components.find((x) => x.id === "debezium");
+      return c ? `Debezium: ${c.detail}` : null;
+    },
+  },
+  ReplicationSlotLagHigh: {
+    title: "No backlog in PostgreSQL",
+    good: "PostgreSQL only keeps a small amount of change history waiting for the pipeline.",
+    bad: "Unread changes are piling up in PostgreSQL and use its disk.",
+    now: (m) => (m && m.slot_lag_bytes != null ? `${fmt.bytes(m.slot_lag_bytes)} waiting · limit 512 MB` : null),
+  },
+  SmallFilesAccumulating: {
+    title: "Storage stays tidy",
+    good: "Tables are not breaking up into lots of tiny files.",
+    bad: "Tables are breaking up into many tiny files - run maintenance.",
+    now: () => "checked on every table · hourly maintenance cleans up",
+  },
+  StreamingStalled: {
+    title: "Pipeline keeps moving",
+    good: "New changes are written to the lakehouse every few seconds.",
+    bad: "Nothing has been written for 10 minutes although changes are waiting.",
+    now: (m) => (m && m.last_batch_age_s != null ? `last write ${fmt.secs(m.last_batch_age_s)} ago` : null),
+  },
+};
+
+function healthCheck(rule, metrics) {
+  const text = HEALTH_CHECKS[rule.name] || { title: rule.name, good: rule.summary, bad: rule.summary, now: () => null };
+  const state = rule.state === "firing" ? "bad" : rule.state === "pending" ? "warn" : "ok";
+  const label = { ok: "All good", warn: "Watching", bad: "Needs attention" }[state];
+  let now = text.now(metrics);
+  if (rule.state === "pending" && rule.since) {
+    now = `over the limit since ${fmt.time(rule.since)} · alerts after ${fmt.secs(rule.for_seconds)}`;
+  }
+  return h("div", { class: `alert ${rule.state}`, title: `${rule.name}: ${rule.expr}${rule.for_seconds ? ` for ${fmt.secs(rule.for_seconds)}` : ""}` },
+    h("div", { class: "alert-top" }, dot(state, state !== "ok"), h("span", { class: "name", text: text.title }), chip(label, state === "ok" ? "" : state)),
+    h("p", { text: state === "ok" ? text.good : text.bad }),
+    now ? h("small", { class: "alert-now", text: now }) : null);
+}
+
 async function viewOverview(view, ctx) {
   const banner = h("div");
   const kpis = h("div", { class: "kpis" }, [1, 2, 3, 4, 5].map(() => h("div", { class: "kpi" }, h("div", { class: "skeleton", style: "height:52px" }))));
@@ -664,20 +800,29 @@ async function viewOverview(view, ctx) {
       card("End-to-end freshness", "heartbeat age in Iceberg · last 30 min", chartF),
       card("Ingest rate", "records merged per second · last 30 min", chartI)),
     h("div", { class: "split" }, workloadCard(ctx),
-      card("Recent micro-batches", "lakehouse.ops.ingest_batches", [batchChartHost, batchesHost], probeBtn)),
-    card("Alert rules", "Prometheus · config/monitoring/alerts.yml", alertsHost, alertsChip));
+      card("Latest writes to the lakehouse", "each batch is one write of the changes that arrived in the last 10 s", [batchChartHost, batchesHost], probeBtn)),
+    card("Health checks", "checked automatically every 15 seconds", alertsHost, alertsChip));
 
   let metrics = null;
   const lastKpiText = {};
   function renderStatus(status) {
     if (!status) return;
     const by = Object.fromEntries(status.components.map((c) => [c.id, c]));
-    flow.replaceChildren(...MAIN_FLOW.map((id) => nodeEl(by[id])));
-    services.replaceChildren(...SIDE.map((id) => nodeEl(by[id])));
+    updateNodes(flow, MAIN_FLOW.map((id) => by[id]));
+    updateNodes(services, SIDE.map((id) => by[id]));
     checked.textContent = `checked ${fmt.time(status.checked_at)}`;
     const live = (metrics && metrics.ingest_rps > 0.5) || (globalState.workload && globalState.workload.running);
     flow.classList.toggle("live", Boolean(live));
+    drawFlowLinks(flow);
   }
+  // the route is measured from the cards: redraw it when they change size (resize, fonts, wrap)
+  let linksFrame = 0;
+  const relink = () => { cancelAnimationFrame(linksFrame); linksFrame = requestAnimationFrame(() => ctx.alive && drawFlowLinks(flow)); };
+  const flowObserver = new ResizeObserver(relink);
+  flowObserver.observe(flow);
+  ctx.cleanup(() => flowObserver.disconnect());
+  ctx.on(window, "resize", relink);
+
   // the top bar is the only /api/status poller; views listen for its result
   renderStatus(globalState.status);
   ctx.on(document, "floe:status", (ev) => renderStatus(ev.detail));
@@ -740,11 +885,11 @@ async function viewOverview(view, ctx) {
     batchesHost.replaceChildren(dataTable([
       { label: "Batch", key: "batch_id", mono: true },
       { label: "Table", render: (r) => r.table_name.replace("shop.", "") },
-      { label: "Events", num: true, render: (r) => fmt.int(r.kafka_records), bar: (r) => r.kafka_records / maxEvents },
-      { label: "Ins / upd / del", num: true, render: (r) => `${fmt.int(r.inserts)} / ${fmt.int(r.updates)} / ${fmt.int(r.deletes)}` },
-      { label: "MERGE", num: true, render: (r) => fmt.ms(r.merge_ms), bar: (r) => r.merge_ms / maxMerge, alert: (r) => r.merge_ms >= 10000 },
-      { label: "Finished", render: (r) => fmt.ago(r.batch_finished_at) },
-    ], rows, { empty: hideProbe ? "No data micro-batches yet - start the workload" : "No micro-batches yet" }));
+      { label: "Changes", num: true, render: (r) => fmt.int(r.kafka_records), bar: (r) => r.kafka_records / maxEvents },
+      { label: "Added / updated / removed", num: true, render: (r) => `${fmt.int(r.inserts)} / ${fmt.int(r.updates)} / ${fmt.int(r.deletes)}` },
+      { label: "Write time", num: true, render: (r) => fmt.ms(r.merge_ms), bar: (r) => r.merge_ms / maxMerge, alert: (r) => r.merge_ms >= 10000 },
+      { label: "When", render: (r) => fmt.ago(r.batch_finished_at) },
+    ], rows, { empty: hideProbe ? "Nothing written yet - start the workload to see changes arrive" : "Nothing written yet" }));
   }
   ctx.every(5000, loadBatches);
 
@@ -752,12 +897,9 @@ async function viewOverview(view, ctx) {
     try {
       const a = await api("/api/alerts");
       const kind = a.firing ? "bad" : a.pending ? "warn" : "ok";
-      alertsChip.replaceChildren(chip(a.firing ? `${a.firing} firing` : a.pending ? `${a.pending} pending` : "all quiet", kind));
-      alertsHost.replaceChildren(...a.rules.map((r) => h("div", { class: `alert ${r.state}` },
-        h("div", { class: "alert-top" }, dot(r.state === "firing" ? "bad" : r.state === "pending" ? "warn" : "ok", r.state !== "inactive"),
-          h("span", { class: "name", text: r.name }), chip(r.state === "inactive" ? "ok" : r.state, r.state === "firing" ? "bad" : r.state === "pending" ? "warn" : "")),
-        h("p", { text: r.summary || "" }),
-        h("code", { title: r.expr, text: `${r.expr}${r.for_seconds ? ` for ${fmt.secs(r.for_seconds)}` : ""}` }))));
+      alertsChip.replaceChildren(chip(a.firing ? `${a.firing} need${a.firing === 1 ? "s" : ""} attention`
+        : a.pending ? `${a.pending} being watched` : "all good", kind));
+      alertsHost.replaceChildren(...a.rules.map((r) => healthCheck(r, metrics)));
     } catch (e) {
       alertsChip.replaceChildren(chip("unavailable", "warn"));
       alertsHost.replaceChildren(h("div", { class: "empty", text: e.message }));
