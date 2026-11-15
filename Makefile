@@ -4,7 +4,7 @@ DC    := docker compose
 TOOLS := $(DC) --profile tools run --rm tools python3 -m
 
 .DEFAULT_GOAL := help
-.PHONY: help jars pull build up down clean status load workload-start workload-stop validate console \
+.PHONY: help jars pull build up down clean status load workload-start workload-stop validate console rebuild-lake \
         freshness optimize bench report demo-schema demo-timetravel demo-gdpr trino psql \
         logs maintenance-now test test-integration
 
@@ -73,6 +73,9 @@ demo-timetravel: ## Demo: Iceberg snapshots and time travel
 
 demo-gdpr: ## Demo: GDPR erasure (row-level delete, merge-on-read, physical purge)
 	./scripts/demos/gdpr_delete.sh
+
+rebuild-lake: ## Re-import the lakehouse from a fresh Debezium snapshot (PostgreSQL untouched)
+	./scripts/rebuild_lake.sh
 
 console: ## Open the Floe Console (web interface) in the browser
 	@url=http://localhost:8090; echo "Floe Console: $$url"; \

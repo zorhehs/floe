@@ -41,6 +41,8 @@ TRIGGER = os.getenv("TRIGGER_INTERVAL", "10 seconds")
 MAX_OFFSETS = int(os.getenv("MAX_OFFSETS_PER_TRIGGER", "100000"))
 METRICS_TABLE = f"{CATALOG}.ops.ingest_batches"
 COMMIT_RETRIES = int(os.getenv("COMMIT_RETRIES", "6"))
+# How often consumed records are deleted from the CDC topics (0 disables it).
+KAFKA_TRIM_INTERVAL = float(os.getenv("KAFKA_TRIM_INTERVAL_SECONDS", "300"))
 
 # Columns added by the pipeline to every lakehouse table.
 META_FIELDS = [
@@ -378,6 +380,48 @@ METRICS_SCHEMA = T.StructType([
 ])
 
 
+_last_trim = 0.0
+_trim_floor: dict = {}  # (topic, partition) -> start offset of the latest batch that read it
+
+
+def trim_consumed_records(spark: SparkSession, batch_starts: dict) -> None:
+    """Delete the Kafka records that earlier, already committed micro-batches consumed.
+
+    Spark plans micro-batch N only after batch N-1 is committed in the checkpoint, and batch N
+    starts exactly where N-1 ended. Everything before the start offsets of the running batch is
+    therefore in Iceberg and never read again - not even after a crash, which replays batch N
+    from these same offsets. The same holds for the start of the latest batch that read a
+    partition that is quiet now. Trimming to them keeps the topics small, means a stack switched off
+    for weeks cannot lose unprocessed events to time-based retention (the topics have none), and
+    makes erased rows (GDPR) leave Kafka minutes after they are merged.
+    """
+    global _last_trim
+    # A partition that is quiet now keeps the floor of the last batch that read it: that batch
+    # is committed (or is the running one), so records before its start are safe to delete.
+    for tp, offset in batch_starts.items():
+        _trim_floor[tp] = max(offset, _trim_floor.get(tp, 0))
+    if not KAFKA_TRIM_INTERVAL or time.time() - _last_trim < KAFKA_TRIM_INTERVAL:
+        return
+    batch_starts = {tp: offset for tp, offset in _trim_floor.items() if offset > 0}  # nothing before 0
+    if not batch_starts:
+        return
+    jvm = spark.sparkContext._jvm
+    props = jvm.java.util.Properties()
+    props.put("bootstrap.servers", KAFKA_BOOTSTRAP)
+    admin = jvm.org.apache.kafka.clients.admin.AdminClient.create(props)
+    try:
+        to_delete = jvm.java.util.HashMap()
+        for (topic, partition), offset in batch_starts.items():
+            to_delete.put(jvm.org.apache.kafka.common.TopicPartition(topic, int(partition)),
+                          jvm.org.apache.kafka.clients.admin.RecordsToDelete.beforeOffset(int(offset)))
+        admin.deleteRecords(to_delete).all().get(30, jvm.java.util.concurrent.TimeUnit.SECONDS)
+        _last_trim = time.time()
+        log.info("trimmed consumed Kafka records: %s",
+                 ", ".join(f"{t}[{p}]<{o}" for (t, p), o in sorted(batch_starts.items())))
+    finally:
+        admin.close()
+
+
 def process_batch(batch: DataFrame, batch_id: int) -> None:
     spark = batch.sparkSession
     started = datetime.now(timezone.utc)
@@ -387,6 +431,8 @@ def process_batch(batch: DataFrame, batch_id: int) -> None:
                     F.col("value").cast("string").alias("value"))
             .persist())
     try:
+        starts = {(r.topic, r.partition): r.start for r in
+                  rows.groupBy("topic", "partition").agg(F.min("offset").alias("start")).collect()}
         per_topic = {r.topic: r.n for r in rows.groupBy("topic").agg(F.count("*").alias("n")).collect()}
         results = []
         for topic in sorted(per_topic):
@@ -396,6 +442,11 @@ def process_batch(batch: DataFrame, batch_id: int) -> None:
                 results.append(stats)
     finally:
         rows.unpersist()
+
+    try:
+        trim_consumed_records(spark, starts)
+    except Exception as exc:  # noqa: BLE001 - trimming is housekeeping; ingestion must go on
+        log.warning("batch %d: trimming consumed Kafka records failed: %s", batch_id, str(exc).splitlines()[0][:200])
 
     if not results:
         return

@@ -99,6 +99,7 @@ The console has a light and a dark mode (toggle in the header, or `?theme=dark` 
 | `make report` | Rebuild the charts and `summary.md` of the latest benchmark |
 | `make maintenance-now` | Run the hourly maintenance job once, right now |
 | `make console` | Open the Floe Console in the browser |
+| `make rebuild-lake` | Re-import the lakehouse from a fresh Debezium snapshot of PostgreSQL (when the stream cannot resume) |
 | `make trino` / `make psql` / `make logs` | CLIs and logs |
 | `make test` / `make test-integration` | Unit tests (`pip install -r tests/requirements.txt && pip install pyspark==3.5.6`, Java 17 for the Spark test) / the ~15 min full-pipeline test |
 
@@ -201,7 +202,7 @@ floe/
 * **Dropped columns** in PostgreSQL stay in Iceberg; new rows get NULL there. Type changes that Iceberg cannot apply in place are cast to the existing type and logged.
 * **Columns added with a non-NULL `DEFAULT`** reach Iceberg only for rows changed afterwards. PostgreSQL fills in existing rows without writing WAL row events, which is a standard Debezium limitation. `make validate` reports such columns.
 * **`TRUNCATE`** is not propagated (Debezium default), and tables need a primary key to be captured.
-* **GDPR purge scope:** the purge DAG erases the rows from every Iceberg data file and snapshot, but the change events that carried them stay in Kafka until the topic retention (7 days, `topic.creation.default.retention.ms`) removes them. Shorten the retention or delete the records up to the purge offset if that window matters.
+* **GDPR purge scope:** the purge DAG erases the rows from every Iceberg data file and snapshot. The change events that carried them stay in Kafka only until the streaming job trims the records it has already committed (every 5 minutes, `KAFKA_TRIM_INTERVAL_SECONDS`).
 * **Airflow** runs on SQLite with the SequentialExecutor (one task at a time): a running hourly maintenance task delays a purge or layout run triggered meanwhile.
 * **Deployment:** single-node, local mode. Every host port is bound to `127.0.0.1`, and the credentials in `.env.example` are for local development only.
 

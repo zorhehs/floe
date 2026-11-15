@@ -62,6 +62,7 @@ TRINO_URL = f"http://{os.getenv('TRINO_HOST', 'trino')}:{os.getenv('TRINO_PORT',
 AIRFLOW_URL = os.getenv("AIRFLOW_URL", "http://airflow:8080")
 GRAFANA_URL = os.getenv("GRAFANA_URL", "http://grafana:3000")
 CONNECTOR = "postgres-cdc"
+SPARK_SETTLE_SECONDS = 90
 
 DAGS = ["iceberg_maintenance", "iceberg_layout_optimization", "iceberg_gdpr_purge"]
 SQL_ROW_LIMIT = 1000
@@ -328,8 +329,13 @@ def check_spark():
     apps = _get(f"{SPARK_UI_URL}/api/v1/applications").json()
     if not apps:
         return False, "no application"
-    # the batch age comes from the exporter via /api/metrics; a health check must not query Trino
-    return True, "streaming job running"
+    # A failing stream exits and Docker restarts it, so a crash loop still answers here:
+    # only call it healthy once the driver has stayed up past its first micro-batches.
+    # (The batch age comes from the exporter via /api/metrics; a health check must not query Trino.)
+    up = apps[0]["attempts"][0].get("duration", 0) / 1000
+    if up < SPARK_SETTLE_SECONDS:
+        return False, f"started {up:.0f} s ago - if this keeps resetting, check its log"
+    return True, f"streaming job running · up {human_age(up)}"
 
 
 def check_iceberg():

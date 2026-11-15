@@ -399,6 +399,15 @@ def test_alert_rules_are_sorted_firing_first(monkeypatch):
     assert out["rules"][2]["summary"] == "nothing"
 
 
+@pytest.mark.parametrize("uptime_ms, healthy", [(5_000, False), (60_000, False), (600_000, True)])
+def test_spark_is_only_healthy_once_the_stream_stays_up(monkeypatch, uptime_ms, healthy):
+    # a failing stream exits and is restarted by Docker, so its UI keeps answering
+    apps = [{"name": "cdc_to_iceberg", "attempts": [{"duration": uptime_ms, "completed": False}]}]
+    monkeypatch.setattr(app, "_get", lambda url, **kw: type("R", (), {"json": lambda self: apps})())
+    ok, detail = app.check_spark()
+    assert ok is healthy and detail
+
+
 def test_index_references_existing_assets():
     static = ROOT / "src/console/static"
     html = (static / "index.html").read_text()

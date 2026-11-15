@@ -74,7 +74,7 @@ sequenceDiagram
   * `customer` is sorted by `c_nationkey, c_custkey`.
   * `rewrite_data_files` runs with the sort strategy (target 128 MB, applies all deletes), followed by `rewrite_position_delete_files`, `rewrite_manifests`, `expire_snapshots` and `remove_orphan_files` (Iceberg enforces a minimum age of 24 h so that files of in-flight commits are never deleted; the storage listing is supplied through the S3 API).
 * **Routine maintenance (`iceberg_maintenance`, hourly):** compaction with delete thresholds, delete and manifest rewrite, expiry of snapshots older than one day (keeping 10), and orphan cleanup.
-* **GDPR purge (`iceberg_gdpr_purge`):** rewrites every data file that has deletes and expires all older snapshots, so the erased rows no longer exist in storage. The Kafka change events that carried them remain until the topic retention (7 days) removes them.
+* **GDPR purge (`iceberg_gdpr_purge`):** rewrites every data file that has deletes and expires all older snapshots, so the erased rows no longer exist in storage. The Kafka change events that carried them are deleted by the streaming job's trim step within minutes (see Consistency and failure handling).
 
 ## Consistency and failure handling
 
@@ -86,6 +86,8 @@ sequenceDiagram
 | Kafka unavailable | Debezium pauses; the WAL is retained in PostgreSQL. |
 | Debezium task FAILED (for example after a PostgreSQL restart) | `connect-init` restarts the failed task through the Connect REST API; the connector resumes from its stored LSN. |
 | PostgreSQL restart while the workload runs | The generator and the console workload reconnect; rolled-back ticks are not counted. |
+| Stack switched off for weeks | The CDC topics have no time-based retention (`retention.ms=-1`, 1 GiB size cap per topic as a safety net), so nothing the lake still needs ages out while Kafka is down. Instead, every 5 minutes the streaming job deletes the records that already-committed micro-batches consumed: Spark plans batch N only after N-1 is committed, so everything before batch N's start offsets is in Iceberg. Kafka therefore holds only the not-yet-merged backlog. |
+| Kafka lost events the checkpoint needs (Spark fails with `OffsetOutOfRange`) | The job fails loudly (`failOnDataLoss`) rather than skipping data, and the console shows Spark red. `make rebuild-lake` stops Debezium, resets its offsets and slot, drops the CDC topics, Iceberg tables and checkpoint, and re-imports PostgreSQL from a fresh consistent snapshot. PostgreSQL is not touched, and the script ends with a checksum validation. |
 | Catalog restart | Catalog state (the pointer to each table's current metadata file) lives in the PostgreSQL database `iceberg_catalog`, whose commits are atomic and safe under concurrency. An early SQLite version failed with `SQLITE_BUSY` under concurrent commits. Table data and metadata are in MinIO. |
 
 ## Scalability (cloud deployment)

@@ -13,6 +13,10 @@ def test_debezium_connector_config():
     assert cfg["decimal.handling.mode"] == "string"          # exact decimals, mapped by the job
     assert cfg["topic.prefix"] == "pg"                       # job subscribes to pg.shop.*
     assert "${env:" in cfg["database.password"]              # no literal secrets
+    # no time-based retention: a stack switched off for weeks must not lose unmerged events;
+    # the streaming job trims what it has committed, the size cap is only a safety net
+    assert cfg["topic.creation.default.retention.ms"] == "-1"
+    assert int(cfg["topic.creation.default.retention.bytes"]) > 0
 
 
 def test_query_suite_is_readonly_and_targets_lakehouse():
