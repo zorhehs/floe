@@ -8,6 +8,7 @@ ignore = ["E731", "B023"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit"]
+addopts = "-ra"   # always list skipped tests and why: a skip must never look like a pass
 
 [tool.ruff.lint.per-file-ignores]
 # runs on the host's system Python (3.9 on macOS), where zip(strict=...) does not exist

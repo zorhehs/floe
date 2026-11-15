@@ -1,6 +1,6 @@
 # Brief: presentation slides (for Cowork / any slide author)
 
-Build a **12–14 slide** deck (PPTX, plus a PDF export) for the SE-315 Cloud Computing semester project. Save the outputs as `docs/slides/floe.pptx` and `docs/slides/floe.pdf` in this repository.
+Build a **12–14 slide** deck (PPTX, plus a PDF export) for the SE-315 Cloud Computing semester project. Save the outputs as `docs/slides/cc-streaming-group04.pptx` and `docs/slides/cc-streaming-group04.pdf` in this repository (the current deck lives there under those names).
 
 ## Required content (course rubric)
 The course requires these sections:

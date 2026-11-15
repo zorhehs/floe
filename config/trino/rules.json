@@ -1,0 +1,6 @@
+{
+  "catalogs": [
+    {"user": "workbench", "catalog": ".*", "allow": "read-only"},
+    {"catalog": ".*", "allow": "all"}
+  ]
+}

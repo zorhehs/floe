@@ -82,6 +82,9 @@ def counts_match(t: Trino) -> tuple[bool, dict]:
     return not lag, lag
 
 
+POLL_SECONDS = 10  # the streaming trigger interval: polling faster cannot observe anything new
+
+
 def wait_consistent(t: Trino, timeout: int, quiet: bool = False) -> tuple[bool, float, list[dict]]:
     start = time.time()
     while True:
@@ -90,7 +93,7 @@ def wait_consistent(t: Trino, timeout: int, quiet: bool = False) -> tuple[bool, 
         if not same_counts and time.time() - start <= timeout:
             if not quiet:
                 print(f"  waiting for pipeline to catch up: {lag}")
-            time.sleep(5)
+            time.sleep(POLL_SECONDS)
             continue
         results = compare(t)
         if all(r["ok"] for r in results):
@@ -100,7 +103,7 @@ def wait_consistent(t: Trino, timeout: int, quiet: bool = False) -> tuple[bool, 
         if not quiet:
             lag = {r["table"]: (r.get("source_rows"), r.get("lake_rows")) for r in results if not r["ok"]}
             print(f"  waiting for pipeline to catch up: {lag}")
-        time.sleep(5)
+        time.sleep(POLL_SECONDS)
 
 
 def main():

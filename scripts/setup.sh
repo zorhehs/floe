@@ -16,5 +16,8 @@ fi
 
 ./scripts/fetch-jars.sh
 ./scripts/pull-images.sh
+# The containers run as uid 185 (spark): results/ is a bind mount they write benchmark and
+# maintenance reports into, which on Linux hosts is not writable unless we say so.
+chmod -R a+rwX results
 docker compose --profile tools build
 echo "Setup complete. Next: ./scripts/run_demo.sh"

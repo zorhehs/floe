@@ -13,7 +13,8 @@ For every micro-batch and every captured table (one Kafka topic per table):
 4. Apply the batch with one MERGE INTO: deletes, updates and inserts. MERGE is
    idempotent, so a replayed micro-batch after a crash yields the same table
    state (effectively exactly-once together with the Spark checkpoint).
-5. Append per-table batch statistics to `lakehouse.ops.ingest_batches`.
+5. Append per-table batch statistics to `lakehouse.ops.ingest_batches`. A replayed
+   micro-batch appends its rows again, so readers aggregate per (batch_id, table_name).
 
 Tables use Iceberg format v2 with merge-on-read so the streaming writes stay
 cheap; the resulting small/delete files are cleaned up by the maintenance jobs.
@@ -39,7 +40,9 @@ CHECKPOINT = os.getenv("CHECKPOINT_DIR", "/opt/checkpoints/cdc_to_iceberg")
 TRIGGER = os.getenv("TRIGGER_INTERVAL", "10 seconds")
 MAX_OFFSETS = int(os.getenv("MAX_OFFSETS_PER_TRIGGER", "100000"))
 METRICS_TABLE = f"{CATALOG}.ops.ingest_batches"
-COMMIT_RETRIES = 6
+COMMIT_RETRIES = int(os.getenv("COMMIT_RETRIES", "6"))
+# How often consumed records are deleted from the CDC topics (0 disables it).
+KAFKA_TRIM_INTERVAL = float(os.getenv("KAFKA_TRIM_INTERVAL_SECONDS", "300"))
 
 # Columns added by the pipeline to every lakehouse table.
 META_FIELDS = [
@@ -70,6 +73,12 @@ RETRYABLE_MARKERS = (
 )
 
 log = logging.getLogger("cdc_to_iceberg")
+
+# Per table: the Debezium schema signature last applied and the Iceberg column types at that
+# time. While the signature is unchanged, a micro-batch needs no catalog round trips at all
+# (CREATE NAMESPACE, tableExists, two schema reads), which is the common case for every batch
+# after the first. A commit conflict or any MERGE failure clears the entry.
+KNOWN: dict[str, tuple[tuple, dict]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -279,8 +288,14 @@ def process_topic(spark: SparkSession, batch_id: int, topic: str, rows: DataFram
               .where(F.col("e.op").isin("c", "r", "u", "d")))
 
     spark_fields = [T.StructField(f["field"], target_type(f)) for f in fields]
-    changes = ensure_table(spark, table, namespace, pks, spark_fields)
-    table_types = {f.name: f.dataType for f in spark.table(table).schema.fields}
+    signature = tuple((f.name, f.dataType.simpleString()) for f in spark_fields) + (tuple(pks),)
+    known = KNOWN.get(table)
+    if known and known[0] == signature:
+        changes, table_types = [], known[1]
+    else:
+        changes = ensure_table(spark, table, namespace, pks, spark_fields)
+        table_types = {f.name: f.dataType for f in spark.table(table).schema.fields}
+        KNOWN[table] = (signature, table_types)
 
     cols = []
     for f in fields:
@@ -326,7 +341,11 @@ def process_topic(spark: SparkSession, batch_id: int, topic: str, rows: DataFram
             WHEN NOT MATCHED AND s._cdc_op <> 'd' THEN INSERT ({insert_cols}) VALUES ({insert_vals})
         """
         started = time.time()
-        with_retries(lambda: spark.sql(merge_sql), f"MERGE {table}")
+        try:
+            with_retries(lambda: spark.sql(merge_sql), f"MERGE {table}")
+        except Exception:
+            KNOWN.pop(table, None)  # re-read the table on the next attempt
+            raise
         spark.catalog.dropTempView(view)
         duration_ms = int((time.time() - started) * 1000)
     finally:
@@ -361,6 +380,48 @@ METRICS_SCHEMA = T.StructType([
 ])
 
 
+_last_trim = 0.0
+_trim_floor: dict = {}  # (topic, partition) -> start offset of the latest batch that read it
+
+
+def trim_consumed_records(spark: SparkSession, batch_starts: dict) -> None:
+    """Delete the Kafka records that earlier, already committed micro-batches consumed.
+
+    Spark plans micro-batch N only after batch N-1 is committed in the checkpoint, and batch N
+    starts exactly where N-1 ended. Everything before the start offsets of the running batch is
+    therefore in Iceberg and never read again - not even after a crash, which replays batch N
+    from these same offsets. The same holds for the start of the latest batch that read a
+    partition that is quiet now. Trimming to them keeps the topics small, means a stack switched off
+    for weeks cannot lose unprocessed events to time-based retention (the topics have none), and
+    makes erased rows (GDPR) leave Kafka minutes after they are merged.
+    """
+    global _last_trim
+    # A partition that is quiet now keeps the floor of the last batch that read it: that batch
+    # is committed (or is the running one), so records before its start are safe to delete.
+    for tp, offset in batch_starts.items():
+        _trim_floor[tp] = max(offset, _trim_floor.get(tp, 0))
+    if not KAFKA_TRIM_INTERVAL or time.time() - _last_trim < KAFKA_TRIM_INTERVAL:
+        return
+    batch_starts = {tp: offset for tp, offset in _trim_floor.items() if offset > 0}  # nothing before 0
+    if not batch_starts:
+        return
+    jvm = spark.sparkContext._jvm
+    props = jvm.java.util.Properties()
+    props.put("bootstrap.servers", KAFKA_BOOTSTRAP)
+    admin = jvm.org.apache.kafka.clients.admin.AdminClient.create(props)
+    try:
+        to_delete = jvm.java.util.HashMap()
+        for (topic, partition), offset in batch_starts.items():
+            to_delete.put(jvm.org.apache.kafka.common.TopicPartition(topic, int(partition)),
+                          jvm.org.apache.kafka.clients.admin.RecordsToDelete.beforeOffset(int(offset)))
+        admin.deleteRecords(to_delete).all().get(30, jvm.java.util.concurrent.TimeUnit.SECONDS)
+        _last_trim = time.time()
+        log.info("trimmed consumed Kafka records: %s",
+                 ", ".join(f"{t}[{p}]<{o}" for (t, p), o in sorted(batch_starts.items())))
+    finally:
+        admin.close()
+
+
 def process_batch(batch: DataFrame, batch_id: int) -> None:
     spark = batch.sparkSession
     started = datetime.now(timezone.utc)
@@ -370,6 +431,8 @@ def process_batch(batch: DataFrame, batch_id: int) -> None:
                     F.col("value").cast("string").alias("value"))
             .persist())
     try:
+        starts = {(r.topic, r.partition): r.start for r in
+                  rows.groupBy("topic", "partition").agg(F.min("offset").alias("start")).collect()}
         per_topic = {r.topic: r.n for r in rows.groupBy("topic").agg(F.count("*").alias("n")).collect()}
         results = []
         for topic in sorted(per_topic):
@@ -380,14 +443,22 @@ def process_batch(batch: DataFrame, batch_id: int) -> None:
     finally:
         rows.unpersist()
 
+    try:
+        trim_consumed_records(spark, starts)
+    except Exception as exc:  # noqa: BLE001 - trimming is housekeeping; ingestion must go on
+        log.warning("batch %d: trimming consumed Kafka records failed: %s", batch_id, str(exc).splitlines()[0][:200])
+
     if not results:
         return
     finished = datetime.now(timezone.utc)
     metric_rows = [(batch_id, s["table"], s["kafka_records"], s["rows"], s["inserts"],
                     s["updates"], s["deletes"], s["merge_ms"], started, finished,
                     s["schema_changes"]) for s in results]
-    with_retries(lambda: spark.createDataFrame(metric_rows, METRICS_SCHEMA)
-                 .writeTo(METRICS_TABLE).append(), "metrics append")
+    try:
+        with_retries(lambda: spark.createDataFrame(metric_rows, METRICS_SCHEMA)
+                     .writeTo(METRICS_TABLE).append(), "metrics append")
+    except Exception as exc:  # noqa: BLE001 - the data MERGEs are committed; losing one metrics row is fine
+        log.warning("batch %d: metrics append failed, continuing: %s", batch_id, str(exc).splitlines()[0][:200])
     for s in results:
         log.info("batch %d %-16s records=%-7d merged=%-7d (+%d ~%d -%d) merge=%dms%s",
                  batch_id, s["table"], s["kafka_records"], s["rows"], s["inserts"],
@@ -401,8 +472,12 @@ def main() -> None:
 
     spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {CATALOG}.ops")
     cols = ", ".join(f"{q(f.name)} {f.dataType.simpleString()}" for f in METRICS_SCHEMA.fields)
-    spark.sql(f"CREATE TABLE IF NOT EXISTS {METRICS_TABLE} ({cols}) USING iceberg "
-              "TBLPROPERTIES ('format-version'='2')")
+    # The metrics table commits once per micro-batch (thousands of commits a day), so it needs
+    # the same metadata housekeeping as the business tables.
+    props_sql = ", ".join(f"'{k}'='{v}'" for k, v in TABLE_PROPERTIES.items())
+    spark.sql(f"CREATE TABLE IF NOT EXISTS {METRICS_TABLE} ({cols}) USING iceberg TBLPROPERTIES ({props_sql})")
+    for k, v in TABLE_PROPERTIES.items():  # tables created by an earlier version get the properties too
+        spark.sql(f"ALTER TABLE {METRICS_TABLE} SET TBLPROPERTIES ('{k}'='{v}')")
 
     stream = (spark.readStream.format("kafka")
               .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)

@@ -3,15 +3,15 @@
 ## Requirements
 
 * Docker Desktop 4.x (macOS / Windows) or Docker Engine 24+ with the compose plugin (Linux).
-* **Memory:** at least 8 GB for Docker; 10–12 GB recommended (Docker Desktop → Settings → Resources).
+* **Memory:** at least 8 GB for Docker; 10–12 GB recommended (Docker Desktop → Settings → Resources). The `mem_limit` values in `docker-compose.yml` are per-service caps that add up to 11 GB; the stack runs at about 6 GB in steady state, and a cap only matters if one service misbehaves.
 * **Disk:** about 10 GB free for images and data.
 * `make`, `bash` and `curl`. On Windows, use WSL2.
-* Free ports: 3000, 4040, 5433, 8080, 8083, 8088, 8181, 9000, 9001, 9090, 29092.
+* Free ports on 127.0.0.1: 3000, 4040, 5433, 8080, 8083, 8088, 8090, 8181, 9000, 9001, 9090, 29092 (nothing is exposed on other interfaces).
 
 ## Step by step
 
 ```bash
-git clone <repo-url> floe && cd floe
+git clone https://github.com/zorhehs/floe.git floe && cd floe
 ./scripts/setup.sh        # .env from .env.example, Spark jars (verified), images, builds
 ./scripts/run_demo.sh     # stack up, TPC-H tiny load, live workload, validation, sample queries
 ```
@@ -20,10 +20,10 @@ The same steps with `make`:
 
 | Step | Command | Expected result |
 |---|---|---|
-| 1 | `make up` | All services running. `make status` shows the `postgres-cdc` connector `RUNNING` and topics `pg.shop.*`. |
-| 2 | `make load` | Prints rows loaded and `CONSISTENT: N rows queryable in Iceberg after X s`. |
+| 1 | `make up` | All services running. `make status` shows the `postgres-cdc` connector `RUNNING` and topics `pg.shop.*`. The Floe Console at http://localhost:8090 (`make console`) shows 10/10 components healthy. |
+| 2 | `make load` | Prints the rows loaded per table and `CONSISTENT: N rows queryable in Iceberg X s after load start (R rows/s)`. |
 | 3 | `make workload-start` | The Grafana dashboard shows ingest rate and freshness. |
-| 4 | `make validate` | `[OK]` for every table. |
+| 4 | `make validate` | `[OK ]` for every table, then `CONSISTENT`. |
 | 5 | `make demo-schema`, `make demo-timetravel`, `make demo-gdpr` | Scripted demonstrations. |
 | 6 | `make bench` | `results/benchmark-<ts>/summary.md` with charts. |
 | 7 | `./scripts/cleanup.sh [--volumes]` | Stops the stack and optionally deletes all data. |
@@ -46,6 +46,8 @@ The same steps with `make`:
 | `connect-init` failed | Run `docker compose logs connect-init`. Usually PostgreSQL wasn't ready yet; re-run `docker compose up -d connect-init`. |
 | Validation says `NOT CONSISTENT` while the generator runs | Expected: the lake trails the source by a few seconds. Stop the generator and validate again. |
 | Image pulls fail on a slow network | `make pull` retries every image until it succeeds. `make jars` resumes partial downloads. |
+| A component is red in the Floe Console | The card shows the error. Run `docker compose logs <service>`; most recover on their own, as every service has `restart: unless-stopped`. |
+| Heartbeat MERGEs and freshness get slower after hours of running | The hourly `iceberg_maintenance` DAG keeps the heartbeat and metrics tables small. The Airflow container unpauses it on every start; if it was paused by hand in the meantime, enable it on the Maintenance page (or in Airflow) or run `make maintenance-now`. |
 | Start completely fresh | `./scripts/cleanup.sh --volumes && make up` |
 
 ## Cloud deployment notes

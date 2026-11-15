@@ -12,7 +12,8 @@ from pathlib import Path
 
 import pytest
 
-pyspark = pytest.importorskip("pyspark")
+pyspark = pytest.importorskip("pyspark",
+                              reason="pip install -r tests/requirements.txt (pyspark + Java 17) for the Spark tests")
 from pyspark.sql import SparkSession  # noqa: E402
 from pyspark.sql import functions as F  # noqa: E402
 from pyspark.sql import types as T  # noqa: E402
@@ -26,12 +27,17 @@ spec.loader.exec_module(cdc)
 @pytest.fixture(scope="module")
 def spark(tmp_path_factory):
     # isolate from any spark-defaults.conf (e.g. the lakehouse catalog in the image)
+    previous = os.environ.get("SPARK_CONF_DIR")
     os.environ["SPARK_CONF_DIR"] = str(tmp_path_factory.mktemp("spark-conf"))
     s = (SparkSession.builder.master("local[1]").appName("unit")
          .config("spark.sql.session.timeZone", "UTC")
          .config("spark.ui.enabled", "false").getOrCreate())
     yield s
     s.stop()
+    if previous is None:
+        os.environ.pop("SPARK_CONF_DIR", None)
+    else:
+        os.environ["SPARK_CONF_DIR"] = previous
 
 
 # Debezium field schemas as produced with decimal.handling.mode=string and

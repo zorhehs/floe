@@ -49,12 +49,13 @@ def file_stats(t: Trino) -> dict:
     out = {}
     for table in TABLES:
         rows = t.rows(f'SELECT content, count(*), coalesce(sum(file_size_in_bytes), 0), '
-                      f'coalesce(sum(record_count), 0) FROM {LAKE}."{table}$files" GROUP BY content')
+                      f'coalesce(sum(record_count), 0), count(DISTINCT spec_id) '
+                      f'FROM {LAKE}."{table}$files" GROUP BY content')
         by = {r[0]: r for r in rows}
-        data = by.get(0, (0, 0, 0, 0))
+        data = by.get(0, (0, 0, 0, 0, 0))
         dels = [by[c] for c in (1, 2) if c in by]
         snaps = t.scalar(f'SELECT count(*) FROM {LAKE}."{table}$snapshots"')
-        spec = t.rows(f'SELECT count(DISTINCT spec_id) FROM {LAKE}."{table}$files"')[0][0]
+        spec = max((r[4] for r in rows), default=0)
         out[table] = {
             "data_files": data[1], "data_bytes": data[2], "data_records": data[3],
             "delete_files": sum(r[1] for r in dels), "delete_bytes": sum(r[2] for r in dels),
@@ -87,25 +88,32 @@ def storage_stats() -> dict:
     return out
 
 
+# A micro-batch replayed after a crash appends its metrics rows again: aggregate per batch and table.
+BATCHES = """(SELECT batch_id, table_name, max(kafka_records) AS kafka_records, max(rows_merged) AS rows_merged,
+                     max(inserts) AS inserts, max(updates) AS updates, max(deletes) AS deletes, max(merge_ms) AS merge_ms,
+                     min(batch_started_at) AS batch_started_at, max(batch_finished_at) AS batch_finished_at
+              FROM lakehouse.ops.ingest_batches GROUP BY batch_id, table_name)"""
+
+
 def ingest_stats(t: Trino) -> dict:
-    rows = t.rows("""
+    rows = t.rows(f"""
         SELECT table_name, count(*) AS batches, sum(rows_merged), sum(kafka_records), sum(merge_ms),
                approx_percentile(merge_ms, 0.5), approx_percentile(merge_ms, 0.95), max(merge_ms)
-        FROM lakehouse.ops.ingest_batches GROUP BY table_name ORDER BY table_name""")
+        FROM {BATCHES} GROUP BY table_name ORDER BY table_name""")
     per_table = {r[0]: {"batches": r[1], "rows_merged": r[2], "kafka_records": r[3],
                         "merge_seconds": round(r[4] / 1000, 1),
                         "merge_rows_per_sec": round(r[2] / (r[4] / 1000), 1) if r[4] else None,
                         "merge_ms_p50": r[5], "merge_ms_p95": r[6], "merge_ms_max": r[7]} for r in rows}
-    batch = t.rows("""
+    batch = t.rows(f"""
         SELECT count(*), sum(records), sum(secs), approx_percentile(secs, 0.5), approx_percentile(secs, 0.95),
                max(records / nullif(secs, 0))
         FROM (SELECT batch_id, sum(kafka_records) AS records,
                      date_diff('millisecond', min(batch_started_at), max(batch_finished_at)) / 1000.0 AS secs
-              FROM lakehouse.ops.ingest_batches GROUP BY batch_id)""")[0]
-    timeline = t.rows("""
+              FROM {BATCHES} GROUP BY batch_id)""")[0]
+    timeline = t.rows(f"""
         SELECT batch_id, max(batch_finished_at), sum(kafka_records),
                date_diff('millisecond', min(batch_started_at), max(batch_finished_at))
-        FROM lakehouse.ops.ingest_batches GROUP BY batch_id ORDER BY batch_id""")
+        FROM {BATCHES} GROUP BY batch_id ORDER BY batch_id""")
     return {
         "per_table": per_table,
         "batches": batch[0], "records": batch[1],
@@ -197,14 +205,15 @@ def cmd_freshness(args) -> Path:
         if deadline and time.time() > deadline:
             timed_out += len(pending)
             break
-        time.sleep(0.25)
+        time.sleep(1.0)  # the trigger is 10 s and p50 is seconds: polling faster only loads the coordinator under test
 
     pipeline = t.rows(f"""
         SELECT approx_percentile(date_diff('millisecond', _cdc_source_ts, _ingested_at), 0.5),
                approx_percentile(date_diff('millisecond', _cdc_source_ts, _ingested_at), 0.95)
         FROM {LAKE}.cdc_probe WHERE probe_id >= {base}""")[0]
     lat = sorted(latencies)
-    pct = lambda p: round(lat[min(len(lat) - 1, int(p * len(lat)))], 2) if lat else None  # noqa: E731
+    # nearest-rank percentile (the value at position ceil(p*n)), the usual convention for latency reports
+    pct = lambda p: round(lat[min(len(lat) - 1, max(0, int(-(-p * len(lat) // 1)) - 1))], 2) if lat else None  # noqa: E731
     result = {
         "measured_at": datetime.now(timezone.utc).isoformat(),
         "probes": args.probes, "interval_s": args.interval, "visible": len(lat), "timed_out": timed_out,
@@ -251,7 +260,7 @@ def cmd_optimize(args) -> Path:
                                          {"tables": "", "expire_older_than_minutes": 0, "retain_last": 1,
                                           "orphan_older_than_minutes": 24 * 60})
         results["optimization"]["wall_seconds"] = round(time.time() - t0, 1)
-        results["optimization"]["spark_steps"] = collect_maintenance_reports(results["optimization"]["run_id"], t0)
+        results["optimization"]["spark_steps"] = collect_maintenance_reports(t0)
         print(f"Optimisation finished in {results['optimization']['wall_seconds']}s")
 
         print("Re-checking PostgreSQL vs Iceberg after optimisation ...")
@@ -278,7 +287,8 @@ def cmd_optimize(args) -> Path:
     return out_dir
 
 
-def collect_maintenance_reports(run_id: str, since: float) -> dict:
+def collect_maintenance_reports(since: float) -> dict:
+    """Per-step Spark timings written by the DAG tasks (files newer than the DAG trigger)."""
     steps = {}
     folder = REPORTS_DIR / "maintenance"
     for path in sorted(folder.glob("iceberg_layout_optimization__*.json")):
@@ -420,7 +430,11 @@ def build_report(out_dir: Path) -> None:
         L.append(f"| {tb} | {fmt_bytes(b_)} ({before['storage'][tb]['objects']} objects) | "
                  f"{fmt_bytes(a_)} ({after['storage'].get(tb, {}).get('objects', 0)} objects) | "
                  f"{(1 - a_ / b_) * 100 if b_ else 0:.1f}% |")
-    L += ["", "![storage](storage.png)", "", "## Compaction overhead", "",
+    L += ["", "![storage](storage.png)", "",
+          "The DAG expires every snapshot but the newest (`expire_older_than_minutes 0, retain_last 1`), so the storage "
+          "difference is history expiry plus compaction, not compaction alone; the live file counts above isolate the "
+          "compaction effect.", "", "## Compaction overhead", ""]
+    L += [
           f"Airflow DAG `iceberg_layout_optimization` wall time: **{r['optimization']['wall_seconds']} s**", "",
           "| Task | Duration (s) |", "|---|---:|"]
     for task, info in r["optimization"]["tasks"].items():

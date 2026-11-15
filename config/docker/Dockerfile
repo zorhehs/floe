@@ -25,7 +25,9 @@ WORKDIR /opt/spark/work-dir
 USER spark
 
 # ---------------------------------------------------------------------------
-FROM spark AS tools
+# Python dependencies are installed before any source is copied, so editing
+# src/ only invalidates the cheap COPY layers below and never re-runs pip.
+FROM spark AS pydeps
 USER root
 # Every shared dependency is resolved against Airflow's constraint file (vendored
 # for reproducible offline-friendly builds) so the airflow target adds Airflow
@@ -33,22 +35,24 @@ USER root
 COPY config/docker/requirements-tools.txt config/docker/constraints-airflow-2.10.5-py3.10.txt /tmp/
 RUN pip3 install --no-cache-dir --retries 20 --timeout 60 -r /tmp/requirements-tools.txt \
       --constraint /tmp/constraints-airflow-2.10.5-py3.10.txt
-COPY --chown=spark:spark src /opt/src
 ENV PYTHONPATH=/opt/src
+
+# ---------------------------------------------------------------------------
+FROM pydeps AS tools
+COPY --chown=spark:spark src /opt/src
 WORKDIR /opt/src
 USER spark
 
 # ---------------------------------------------------------------------------
-FROM tools AS airflow
-USER root
+FROM pydeps AS airflow
 ARG AIRFLOW_VERSION=2.10.5
-ARG PYTHON_MM=3.10
 ENV AIRFLOW_HOME=/opt/airflow
 RUN pip3 install --no-cache-dir --retries 20 --timeout 60 "apache-airflow==${AIRFLOW_VERSION}" \
       --constraint /tmp/constraints-airflow-2.10.5-py3.10.txt \
  && mkdir -p /opt/airflow/dags /opt/airflow/logs /opt/airflow/state \
  && chown -R spark:spark /opt/airflow
 COPY --chmod=755 config/docker/airflow-entrypoint.sh /opt/airflow-entrypoint.sh
+COPY --chown=spark:spark src /opt/src
 WORKDIR /opt/airflow
 USER spark
 ENTRYPOINT ["/opt/airflow-entrypoint.sh"]

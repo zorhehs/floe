@@ -7,3 +7,6 @@ __pycache__/
 .pytest_cache/
 docs/report/latex/main.pdf
 docs/report/latex/_arch.html
+.ruff_cache/
+.venv/
+.DS_Store

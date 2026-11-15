@@ -13,6 +13,7 @@ Compile with pdflatex (Overleaf default) or `tectonic main.tex`.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -23,7 +24,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 HERE = ROOT / "docs" / "report" / "latex"
 RESULTS = ROOT / "results"
-CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+CHROME = os.environ.get("CHROME") or next(
+    (c for c in ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", shutil.which("google-chrome"),
+                 shutil.which("chromium"), shutil.which("chromium-browser")) if c and Path(c).exists()), None)
+ARCH_TEMPLATE = ROOT / "docs" / "report" / "report_template.html"
 
 
 def fmt_bytes(n: float) -> str:
@@ -39,8 +43,16 @@ def tex(s: str) -> str:
 
 
 def architecture_pdf(out: Path) -> None:
-    """Vector PDF of the architecture diagram (SVG shared with the HTML report)."""
-    template = (ROOT / "docs" / "report" / "report_template.html").read_text()
+    """Vector PDF of the architecture diagram (rendered from the SVG in the HTML template).
+
+    The committed figures/architecture.pdf is kept when the template or Chrome is absent,
+    so the paper can be rebuilt from results/ on any machine."""
+    if not ARCH_TEMPLATE.exists() or CHROME is None:
+        if out.exists():
+            print(f"keeping {out.relative_to(ROOT)} (no {ARCH_TEMPLATE.name} or Chrome to re-render it)")
+            return
+        raise SystemExit(f"{out} is missing and cannot be rendered: need {ARCH_TEMPLATE} and Chrome (set CHROME=)")
+    template = ARCH_TEMPLATE.read_text()
     svg = re.search(r"<svg viewBox=\"0 0 760 300\".*?</svg>", template, re.S).group(0)
     svg = svg.replace('width="100%"', 'width="760" height="300"')
     svg = svg.replace("Avenir Next, Helvetica Neue, Arial", "Helvetica, Arial")
