@@ -376,7 +376,7 @@ function stackChart(host, batches, opts = {}) {
   const max = niceMax(Math.max(1, top));
   const slot = (W - L - R) / rows.length, bw = Math.max(3, Math.min(22, slot - 4));
   const y = (v) => T + (1 - Math.min(v, max) / max) * (H - T - B);
-  const svgEl = s("svg", { class: "stack-chart", viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "img", "aria-label": "Change events per micro-batch" });
+  const svgEl = s("svg", { class: "stack-chart", viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "img", "aria-label": "Changes per write" });
   for (let i = 0; i <= 2; i++) {
     const v = (max / 2) * i;
     svgEl.append(s("line", { class: "grid-line", x1: L, x2: W - R, y1: y(v), y2: y(v) }));
@@ -474,15 +474,15 @@ function snapshotChart(host, snaps, opts = {}) {
 
 // ------------------------------------------------------------------ router
 const ROUTES = {
-  overview: { eyebrow: "01 · Operate", title: "Overview", sub: "Health, freshness and throughput of the CDC pipeline", render: viewOverview },
-  live: { eyebrow: "02 · Operate", title: "Live CDC", sub: "Change a row in PostgreSQL and trace it into the Iceberg lakehouse", render: viewLive },
-  tables: { eyebrow: "03 · Inspect", title: "Tables & schema", sub: "Source vs lakehouse, files, and schema evolution", render: viewTables },
-  "time-travel": { eyebrow: "04 · Inspect", title: "Time travel", sub: "Every micro-batch is an Iceberg snapshot - query any of them", render: viewTimeTravel },
-  sql: { eyebrow: "05 · Query", title: "SQL workbench", sub: "Read-only Trino queries over lakehouse, postgresql and tpch catalogs", render: viewSql },
-  maintenance: { eyebrow: "06 · Optimise", title: "Maintenance", sub: "Airflow DAGs that compact, re-layout and purge the Iceberg tables", render: viewMaintenance },
-  gdpr: { eyebrow: "07 · Comply", title: "Right to erasure", sub: "A GDPR delete reaches Iceberg as a merge-on-read delete - the purge makes it physical", render: viewGdpr },
-  validate: { eyebrow: "08 · Verify", title: "Validation", sub: "PostgreSQL vs Iceberg: row counts and order-independent checksums", render: viewValidate },
-  results: { eyebrow: "09 · Evaluate", title: "Benchmark", sub: "Recorded results of make bench (TPC-H sf1)", render: viewResults },
+  overview: { eyebrow: "", title: "Overview", sub: "Is everything running, and how fresh is the data?", render: viewOverview },
+  live: { eyebrow: "", title: "Live CDC", sub: "Change a row and watch it arrive in the lakehouse", render: viewLive },
+  tables: { eyebrow: "", title: "Tables & schema", sub: "Your tables, their columns and their files", render: viewTables },
+  "time-travel": { eyebrow: "", title: "Time travel", sub: "See any table as it was earlier", render: viewTimeTravel },
+  sql: { eyebrow: "", title: "SQL workbench", sub: "Ask questions with SQL", render: viewSql },
+  maintenance: { eyebrow: "", title: "Maintenance", sub: "Keep the tables fast and tidy", render: viewMaintenance },
+  gdpr: { eyebrow: "", title: "Right to erasure", sub: "Delete a customer for good", render: viewGdpr },
+  validate: { eyebrow: "", title: "Validation", sub: "Check that both copies match", render: viewValidate },
+  results: { eyebrow: "", title: "Benchmark", sub: "Measured performance", render: viewResults },
 };
 
 let ctx = null;
@@ -574,7 +574,7 @@ async function refreshTopbar() {
       h("strong", { text: `${status.healthy}/${status.total}` }), allOk ? "components healthy" : "components healthy");
     const wp = document.getElementById("workload-pill");
     wp.replaceChildren(dot(wl.running ? "ok" : "", wl.running), "Workload ",
-      h("strong", { text: wl.running ? `${fmt.int(wl.ops_per_sec)} ops/s` : "off" }));
+      h("strong", { text: wl.running ? `${fmt.int(wl.ops_per_sec)} changes/s` : "off" }));
   } catch (e) {
     const hp = document.getElementById("health-pill");
     hp.replaceChildren(dot("bad"), h("strong", { text: "offline" }));
@@ -605,7 +605,7 @@ function updateNodes(host, components) {
   });
 }
 
-const FLOW_SPEED = 90;      // px/s an event travels along the route (deliberately unhurried)
+const FLOW_SPEED = 45;      // px/s an event travels along the route (deliberately unhurried)
 const FLOW_SPACING = 420;   // px between two events on the route
 
 // Draw the change data path behind the stage cards and, while changes are flowing, send events
@@ -785,23 +785,23 @@ async function viewOverview(view, ctx) {
   const alertsHost = h("div", { class: "alerts" }, [1, 2, 3, 4, 5].map(() => h("div", { class: "alert" }, h("div", { class: "skeleton", style: "height:44px" }))));
   const alertsChip = h("span");
   let hideProbe = true;
-  const probeBtn = button("Show heartbeat", () => {
+  const probeBtn = button("Show monitoring writes", () => {
     hideProbe = !hideProbe;
-    probeBtn.lastChild.textContent = hideProbe ? "Show heartbeat" : "Hide heartbeat";
+    probeBtn.lastChild.textContent = hideProbe ? "Show monitoring writes" : "Hide monitoring writes";
     loadBatches();
   }, { small: true, kind: "ghost" });
 
   view.append(
     banner,
     kpis,
-    card("Pipeline", null, [h("div", { class: "flow-caption", style: "margin-top:0" }, h("span", { text: "Change data path" }), h("span", { text: "PostgreSQL → Trino" })), flow,
-      h("div", { class: "flow-caption" }, h("span", { text: "Storage · orchestration · observability" })), services], checked),
+    card("Pipeline", null, [h("div", { class: "flow-caption", style: "margin-top:0" }, h("span", { text: "How data flows" })), flow,
+      h("div", { class: "flow-caption" }, h("span", { text: "Supporting services" })), services], checked),
     h("div", { class: "grid cols-2" },
-      card("End-to-end freshness", "heartbeat age in Iceberg · last 30 min", chartF),
-      card("Ingest rate", "records merged per second · last 30 min", chartI)),
+      card("How far behind", "last 30 min", chartF),
+      card("Changes written per second", "last 30 min", chartI)),
     h("div", { class: "split" }, workloadCard(ctx),
-      card("Latest writes to the lakehouse", "each batch is one write of the changes that arrived in the last 10 s", [batchChartHost, batchesHost], probeBtn)),
-    card("Health checks", "checked automatically every 15 seconds", alertsHost, alertsChip));
+      card("Latest writes", null, [batchChartHost, batchesHost], probeBtn)),
+    card("Health checks", null, alertsHost, alertsChip));
 
   let metrics = null;
   const lastKpiText = {};
@@ -850,26 +850,26 @@ async function viewOverview(view, ctx) {
     const lagKind = metrics.slot_lag_bytes === null ? "" : metrics.slot_lag_bytes < 64 * 1024 * 1024 ? "ok" : "warn";
     kpis.replaceChildren(
       kpi("Freshness", f === null ? "—" : f >= 120 ? fmt.secs(f) : fmt.num(f, 1), f === null || f >= 120 ? null : "s",
-        f >= 120 ? "last heartbeat merged into Iceberg this long ago" : "PostgreSQL commit → queryable in Trino", fKind, null,
+        f >= 120 ? "behind the database" : "from a change to seeing it", fKind, null,
         { series: metrics.series.freshness, good: "down", fmt: (v) => fmt.secs(v), eps: 0.5 }),
-      kpi("Ingest rate", fmt.num(metrics.ingest_rps || 0, 1), "rec/s", `${fmt.int(metrics.batches_5m)} micro-batches in 5 min`, null, null,
-        { series: metrics.series.ingest, good: "up", fmt: (v) => `${fmt.num(v, 1)} rec/s`, eps: 0.2 }),
-      kpi("Replication lag", lagNum, lagUnit || null, "WAL not yet confirmed by Debezium", lagKind, null,
+      kpi("Changes written", fmt.num(metrics.ingest_rps || 0, 1), "/s", "per second", null, null,
+        { series: metrics.series.ingest, good: "up", fmt: (v) => `${fmt.num(v, 1)}/s`, eps: 0.2 }),
+      kpi("Waiting in PostgreSQL", lagNum, lagUnit || null, "not yet picked up", lagKind, null,
         { series: metrics.series.slot_lag, good: "down", fmt: (v) => fmt.bytes(v), eps: 4096 }),
-      kpi("Last micro-batch", metrics.last_batch_age_s === null ? "—" : fmt.num(metrics.last_batch_age_s, 0), "s ago", "Spark trigger every 10 s",
+      kpi("Last write", metrics.last_batch_age_s === null ? "—" : fmt.num(metrics.last_batch_age_s, 0), "s ago", null,
         null, metrics.last_batch_age_s === null ? null : metrics.last_batch_age_s / 30),
-      kpi("Rows in lakehouse", fmt.int(metrics.lake_rows), null, `source ${fmt.num(metrics.source_tps || 0, 1)} row changes/s`));
+      kpi("Rows in lakehouse", fmt.int(metrics.lake_rows), null, null));
     kpis.querySelectorAll(".kpi-value").forEach((el, i) => {
       const text = el.textContent;
       if (lastKpiText[i] !== undefined && lastKpiText[i] !== text) el.classList.add("tick");
       lastKpiText[i] = text;
     });
     setHero([
-      { title: "Freshness", href: "#/live", text: f === null ? ["Waiting for the first heartbeat."] :
-        f >= 120 ? ["Iceberg is ", h("b", { text: fmt.secs(f) }), " behind PostgreSQL - the streaming job is catching up on the heartbeat table"] :
+      { title: "Freshness", href: "#/live", text: f === null ? ["Waiting for the first measurement."] :
+        f >= 120 ? ["Iceberg is ", h("b", { text: fmt.secs(f) }), " behind the database - catching up"] :
         ["Right now, a change committed in PostgreSQL is ", h("b", { text: "queryable in Iceberg" }), " after ", h("b", { text: `${fmt.num(f, 1)} seconds` })] },
-      { title: "Throughput", href: "#/overview", text: ["The streaming job merged ", h("b", { text: `${fmt.int(metrics.batches_5m)} micro-batches` }), " in the last five minutes, ", h("b", { text: `${fmt.num(metrics.ingest_rps || 0, 1)} records/s` })] },
-      { title: "Lakehouse", href: "#/tables", text: [h("b", { text: `${fmt.int(metrics.lake_rows)} rows` }), " live in Apache Iceberg, every change kept as a ", h("b", { text: "queryable snapshot" })] },
+      { title: "Throughput", href: "#/overview", text: ["The lakehouse is taking in ", h("b", { text: `${fmt.num(metrics.ingest_rps || 0, 1)} changes a second` })] },
+      { title: "Lakehouse", href: "#/tables", text: [h("b", { text: `${fmt.int(metrics.lake_rows)} rows` }), " in the lakehouse, and ", h("b", { text: "every earlier version" }), " can still be opened"] },
     ]);
     const sample = metrics.series.freshness.length ? metrics.series.freshness[metrics.series.freshness.length - 1][0] : null;
     if (sample !== lastSample) { lastSample = sample; drawCharts(); } // the series step is 15 s: redraw only on a new sample
@@ -909,7 +909,7 @@ async function viewOverview(view, ctx) {
   function drawCharts() {
     if (!metrics || metrics.error) return;
     lineChart(chartF, metrics.series.freshness, { fmt: (v, d = 0) => `${fmt.num(v, d)} s`, label: "End-to-end freshness",
-      threshold: { value: 120, label: "alert · 2 min behind" } });
+      threshold: { value: 120, label: "limit · 2 min" } });
     lineChart(chartI, metrics.series.ingest, { fmt: (v, d = 0) => `${fmt.num(v, d)}`, label: "Ingest rate" });
   }
   let resizeFrame = null;
@@ -940,8 +940,8 @@ function loadBanner(ctx) {
 function workloadCard(ctx) {
   const body = h("div", { class: "stack" });
   const range = h("input", { class: "range", type: "range", min: "10", max: "500", step: "10", value: "50", "aria-label": "Operations per second" });
-  const rateLabel = h("b", { text: "50 ops/s" });
-  range.addEventListener("input", () => { rateLabel.textContent = `${range.value} ops/s`; });
+  const rateLabel = h("b", { text: "50 changes/s" });
+  range.addEventListener("input", () => { rateLabel.textContent = `${range.value} changes/s`; });
   const chipHost = h("span");
   const counters = h("div", { class: "counters" });
   const ops = h("div");
@@ -965,13 +965,13 @@ function workloadCard(ctx) {
   function render(wl) {
     globalState.workload = wl;
     chipHost.replaceChildren(wl.running ? chip("running", "ok") : chip("stopped"));
-    if (!touched && wl.running) { range.value = String(wl.ops_per_sec); rateLabel.textContent = `${wl.ops_per_sec} ops/s`; }
+    if (!touched && wl.running) { range.value = String(wl.ops_per_sec); rateLabel.textContent = `${wl.ops_per_sec} changes/s`; }
     startBtn.lastChild.textContent = wl.running ? "Apply rate" : "Start";
     stopBtn.disabled = !wl.running;
     counters.replaceChildren(
       h("div", { class: "counter" }, h("b", { text: fmt.int(wl.total) }), h("span", { text: "operations" })),
-      h("div", { class: "counter" }, h("b", { text: fmt.num(wl.actual_ops_per_sec, 1) }), h("span", { text: "actual ops/s" })),
-      h("div", { class: "counter" }, h("b", { text: fmt.int(wl.errors) }), h("span", { text: "rolled back" })));
+      h("div", { class: "counter" }, h("b", { text: fmt.num(wl.actual_ops_per_sec, 1) }), h("span", { text: "per second now" })),
+      h("div", { class: "counter" }, h("b", { text: fmt.int(wl.errors) }), h("span", { text: "failed" })));
     const done = wl.done || {};
     const names = { insert_order: "new orders", update_order: "order updates", delete_order: "order deletes",
       update_customer: "balance updates", insert_customer: "new customers", delete_customer: "customer deletes" };
@@ -980,7 +980,7 @@ function workloadCard(ctx) {
   }
 
   body.append(
-    h("p", { class: "dim", style: "margin:0", text: "Synthetic OLTP traffic on PostgreSQL: 45% new orders, 20% order updates, 10% order deletes, 15% balance updates, 5% new and 5% deleted customers. One transaction per 100 ms tick." }),
+    h("p", { class: "dim", style: "margin:0", text: "Simulated shop traffic: new orders, updates and deletes." }),
     h("div", { class: "row" }, h("span", { class: "muted", text: "Rate" }), rateLabel),
     range,
     h("div", { class: "row" }, startBtn, stopBtn),
@@ -1045,9 +1045,9 @@ async function viewLive(view, ctx) {
         button("Random", () => randomInto(inputs.key, "orders"), { icon: "dice" }))];
     }
     const explain = {
-      update_customer: "UPDATE shop.customer in PostgreSQL. Debezium reads it from the WAL, Spark MERGEs it into lakehouse.shop.customer.",
-      insert_order: "INSERT into shop.orders. The new row arrives in Iceberg as an insert in the next micro-batch.",
-      delete_order: "DELETE from shop.orders. Iceberg records a row-level delete (merge-on-read), the data file is untouched.",
+      update_customer: "Change a customer in the database and watch it reach the lakehouse.",
+      insert_order: "Add a new order and watch it reach the lakehouse.",
+      delete_order: "Delete an order and watch it disappear from the lakehouse.",
     }[mode];
     form.replaceChildren(h("p", { class: "dim", style: "margin:0", text: explain }), ...fields, h("div", {}, submit));
   }
@@ -1084,9 +1084,9 @@ async function viewLive(view, ctx) {
         h("div", { class: "latency" }, h("b", { text: "0.0" }), h("span", { text: "s - waiting for the lakehouse" })),
         h("ol", { class: "steps" },
           step(committed ? "done" : "active", "Committed in PostgreSQL", committed ? job.log[0].msg.replace("PostgreSQL commit: ", "") : "writing…"),
-          step(committed ? "active" : "", "Captured by Debezium", "reads the change from the WAL (logical replication slot) and publishes it to Kafka"),
-          step(committed ? "active" : "", "Merged into Iceberg", "Spark Structured Streaming MERGEs the micro-batch (trigger every 10 s)"),
-          step("", "Visible in Trino", "polling lakehouse.shop every 400 ms")));
+          step(committed ? "active" : "", "Captured by Debezium", "picks up the change and passes it on"),
+          step(committed ? "active" : "", "Merged into Iceberg", "Spark writes it into the lakehouse"),
+          step("", "Visible in Trino", "checking every moment")));
       return;
     }
     if (job.state === "failed") {
@@ -1146,8 +1146,8 @@ async function viewLive(view, ctx) {
     h("div", { class: "split" },
       h("div", { class: "stack", style: "gap:20px" },
         card("Make a change", null, h("div", { class: "stack" }, seg, form)),
-        card("Session traces", "most recent first", historyHost)),
-      card("Trace", "every timestamp is measured, not estimated", result)));
+        card("Your recent changes", null, historyHost)),
+      card("Trace", null, result)));
 }
 
 // ------------------------------------------------------------------ Tables & schema
@@ -1228,17 +1228,17 @@ async function viewTables(view, ctx, params) {
       card(`shop.${table}`, "PostgreSQL schema vs Iceberg schema (Trino information_schema)", cols,
         h("a", { class: "btn small", href: `#/time-travel?table=${table}` }, icon("time"), "Snapshots")),
       h("div", { class: "stack", style: "gap:20px" },
-        card("Add a column in PostgreSQL", "Iceberg adds it without rewriting data", h("div", { class: "stack" },
+        card("Add a column", null, h("div", { class: "stack" },
           h("div", { class: "fields" },
             h("label", { class: "field" }, h("span", { text: "Name" }), colName),
             h("label", { class: "field" }, h("span", { text: "Type" }), colType)),
           h("label", { class: "field" }, h("span", { text: "Value for the first 5 rows" }), colValue,
             h("small", { text: "Debezium ships the new schema with the next change event, so a few rows are touched." })),
           h("div", {}, addBtn), addLog)),
-        card("Widen a column type", "integer → bigint is a safe Iceberg type promotion", h("div", { class: "stack" },
+        card("Make a number column bigger", null, h("div", { class: "stack" },
           widenable.length ? h("div", { class: "row" }, widenSel, widenBtn) : h("p", { class: "muted", style: "margin:0", text: "No integer columns left to widen in this table." }),
           widenLog)),
-        card("Schema versions", "from $metadata_log_entries", versions))));
+        card("Column history", null, versions))));
   }
 
   ctx.every(10000, loadCards);
@@ -1344,13 +1344,12 @@ async function viewTimeTravel(view, ctx, params) {
   view.append(
     h("div", { class: "row" }, h("span", { class: "muted", text: "Table" }), tableSel),
     h("div", { class: "split-r" },
-      card("Snapshots", "newest first · click one to inspect", snapsHost),
-      card("Snapshot", null, detailHost)),
-    card("History of one row", "the same key read FOR VERSION AS OF each snapshot", h("div", { class: "stack" },
+      card("Versions", "click one to open", snapsHost),
+      card("Version", null, detailHost)),
+    card("History of one row", null, h("div", { class: "stack" },
       h("div", { class: "row" }, keyInput,
         button("Random key", async () => { try { keyInput.value = (await api(`/api/tables/${table}/sample-key`)).key; showRow(); } catch (e) { toast(e.message, "bad"); } }, { icon: "dice" }),
         button("Show history", showRow, { kind: "primary" })),
-      h("p", { class: "muted", style: "margin:0", text: "Tip: change this row on the Live CDC page, then come back - every micro-batch that touched it shows up as a highlighted version." }),
       rowHost)));
   await loadSnaps();
   ctx.every(15000, loadSnaps);
@@ -1361,7 +1360,7 @@ const SNIPPETS = [
   ["Snapshots of orders", "SELECT committed_at, snapshot_id, operation,\n       element_at(summary, 'added-records') AS added_records,\n       element_at(summary, 'added-position-deletes') AS position_deletes\nFROM lakehouse.shop.\"orders$snapshots\"\nORDER BY committed_at DESC"],
   ["Data and delete files", "SELECT content, count(*) AS files, sum(record_count) AS records,\n       round(avg(file_size_in_bytes) / 1024.0, 1) AS avg_kb\nFROM lakehouse.shop.\"orders$files\"\nGROUP BY content\nORDER BY content"],
   ["Partitions", "SELECT * FROM lakehouse.shop.\"orders$partitions\" LIMIT 50"],
-  ["Recent micro-batches", "SELECT batch_id, table_name, kafka_records, inserts, updates, deletes, merge_ms, batch_finished_at\nFROM lakehouse.ops.ingest_batches\nWHERE table_name <> 'shop.cdc_probe'\nORDER BY batch_id DESC\nLIMIT 50"],
+  ["Latest writes", "SELECT batch_id, table_name, kafka_records, inserts, updates, deletes, merge_ms, batch_finished_at\nFROM lakehouse.ops.ingest_batches\nWHERE table_name <> 'shop.cdc_probe'\nORDER BY batch_id DESC\nLIMIT 50"],
   ["Source vs lakehouse counts", "SELECT 'postgresql' AS side, count(*) AS orders FROM postgresql.shop.orders\nUNION ALL\nSELECT 'iceberg', count(*) FROM lakehouse.shop.orders"],
   ["CDC metadata of recent changes", "SELECT o_orderkey, o_orderstatus, o_totalprice, _cdc_op, _cdc_source_ts, _ingested_at\nFROM lakehouse.shop.orders\nORDER BY _ingested_at DESC\nLIMIT 50"],
   ["Time travel (1 hour ago)", "SELECT count(*) AS orders_one_hour_ago\nFROM lakehouse.shop.orders FOR TIMESTAMP AS OF current_timestamp - INTERVAL '1' HOUR"],
@@ -1434,7 +1433,7 @@ async function viewSql(view, ctx) {
   view.append(h("div", { class: "sql-layout" },
     card("Queries", null, list),
     h("div", { class: "stack", style: "gap:20px" },
-      card("Query", "read-only · max 1,000 rows · default catalog lakehouse.shop", h("div", { class: "stack" }, editor,
+      card("Query", "read-only · up to 1,000 rows", h("div", { class: "stack" }, editor,
         h("div", { class: "row" }, runBtn, csvBtn, h("span", { class: "muted", style: "font-size:12px" }, h("kbd", { text: "⌘/Ctrl" }), " ", h("kbd", { text: "Enter" }), " runs the query")))),
       card("Result", null, out))));
   editor.focus({ preventScroll: true });
@@ -1442,9 +1441,9 @@ async function viewSql(view, ctx) {
 
 // ------------------------------------------------------------------ Maintenance
 const DAG_TEXT = {
-  iceberg_maintenance: { title: "Hourly housekeeping", text: "Bin-pack compaction, delete-file and manifest rewrite, snapshot expiry (24 h), orphan-file cleanup.", tables: "" },
-  iceberg_layout_optimization: { title: "Layout optimisation", text: "Partition evolution to months(o_orderdate) + sort order, full sorted rewrite, then cleanup. The before/after benchmark runs this DAG.", tables: "" },
-  iceberg_gdpr_purge: { title: "GDPR purge", text: "Physically erases deleted rows: rewrites every file that has deletes and expires the history that could still read them.", tables: "shop.customer,shop.orders" },
+  iceberg_maintenance: { title: "Hourly housekeeping", text: "Merges small files and clears out old versions. Runs every hour.", tables: "" },
+  iceberg_layout_optimization: { title: "Layout optimisation", text: "Reorganises the orders by month so queries read less.", tables: "" },
+  iceberg_gdpr_purge: { title: "GDPR purge", text: "Removes deleted rows from storage and from history for good.", tables: "shop.customer,shop.orders" },
 };
 
 async function viewMaintenance(view, ctx) {
@@ -1454,7 +1453,7 @@ async function viewMaintenance(view, ctx) {
   let selected = null;
   const tableInputs = {};
 
-  view.append(dagsHost, runHost, card("File layout now", "small files and delete files are what maintenance removes", filesHost,
+  view.append(dagsHost, runHost, card("Files right now", null, filesHost,
     button("Refresh", () => loadFiles(), { small: true, icon: "refresh", kind: "ghost" })));
 
   async function loadDags(force) {
@@ -1482,12 +1481,11 @@ async function viewMaintenance(view, ctx) {
       return h("section", { class: "card dag" },
         h("div", { class: "card-head", style: "margin:0" }, h("h2", { text: meta.title }),
           h("div", { class: "right" }, d.schedule ? chip(d.is_paused ? "schedule paused" : `${d.schedule}`, d.is_paused ? "" : "ok") : chip("manual"))),
-        h("code", { class: "muted", text: d.dag_id }),
         h("p", { class: "dim", style: "margin:0;font-size:13px", text: meta.text }),
         d.error ? h("p", { class: "error-text", text: d.error }) : null,
         h("label", { class: "field" }, h("span", { text: "Tables" }), tableInputs[d.dag_id]),
         h("div", { class: "row" }, runNow, scheduleBtn),
-        d.schedule ? h("small", { class: "muted", text: "Airflow only runs unpaused DAGs: Run now enables the hourly schedule." }) : null,
+        d.schedule ? h("small", { class: "muted", text: "Run now also turns on the hourly schedule." }) : null,
         h("div", { class: "runs" }, d.runs.length ? d.runs.map((r) => h("button", { type: "button", class: "run",
           "aria-pressed": String(selected && selected.run === r.dag_run_id),
           onclick: () => { selected = { dag: d.dag_id, run: r.dag_run_id }; loadDags(true); loadRun(); } },
@@ -1542,14 +1540,14 @@ async function viewGdpr(view, ctx) {
   const subjectHost = h("div");
   const eraseBtn = button("Erase in PostgreSQL", onErase, { kind: "primary", icon: "stop", disabled: true });
   const pause = h("input", { type: "checkbox", id: "pause-wl", checked: true });
-  const purgeBtn = button("Run the purge DAG", onPurge, { kind: "primary", icon: "play", disabled: true });
+  const purgeBtn = button("Run the purge", onPurge, { kind: "primary", icon: "play", disabled: true });
   const purgeBox = h("div", { class: "stack" },
-    h("p", { class: "dim", style: "margin:0", text: "The purge DAG rewrites every data file that has deletes and expires the snapshots that could still read the row. Time travel across the erasure is lost on purpose." }),
+    h("p", { class: "dim", style: "margin:0", text: "Removes the deleted rows from storage and from history, for good." }),
     h("label", { class: "check", for: "pause-wl" }, pause, "Pause the workload while it runs (comparable before/after)"),
     h("div", {}, purgeBtn));
-  const purgeCard = card("Purge", "make it physical", purgeBox);
+  const purgeCard = card("Purge", null, purgeBox);
   purgeCard.hidden = true;
-  const story = h("div", { class: "stack" }, h("div", { class: "empty", text: "Pick a customer on the left. Every step on this page is measured against the running stack." }));
+  const story = h("div", { class: "stack" }, h("div", { class: "empty", text: "Pick a customer on the left." }));
   let subject = null, erased = null;
 
   async function loadSubject(key) {
@@ -1565,7 +1563,7 @@ async function viewGdpr(view, ctx) {
       eraseBtn.disabled = false;
       erased = null;
       purgeCard.hidden = true;
-      setHero([{ title: "Right to erasure", href: "#/gdpr", text: ["Customer ", h("b", { text: `#${subject.key}` }), " asks to be forgotten: ", h("b", { text: `${fmt.int(subject.orders)} orders` }), " and a row held in every Iceberg snapshot."] }]);
+      setHero([{ title: "Right to erasure", href: "#/gdpr", text: ["Customer ", h("b", { text: `#${subject.key}` }), " asks to be forgotten: ", h("b", { text: `${fmt.int(subject.orders)} orders` }), " that the lakehouse still remembers."] }]);
     } catch (e) { subject = null; eraseBtn.disabled = true; subjectHost.replaceChildren(errorBanner(e)); }
   }
 
@@ -1632,7 +1630,7 @@ async function viewGdpr(view, ctx) {
             h("dl", { class: "ghost-row" }, ...Object.entries(r.still_readable).flatMap(([k, v]) => [h("dt", { text: k }), h("dd", { text: v ?? "—" })])))
           : h("p", { text: "the remembered snapshot no longer holds the row" })) : "the pre-erasure snapshot can still be queried")),
       gone ? h("div", { class: "banner" }, h("div", {}, h("h3", { text: "The right to erasure is not satisfied yet" }),
-        h("p", { text: "Delete files hide the row, they do not remove it. Run the purge DAG to rewrite the files and expire the history." }))) : null]);
+        h("p", { text: "The row is hidden but still stored. Run the purge to remove it for good." }))) : null]);
   }
 
   function renderPurge(job) {
@@ -1647,7 +1645,7 @@ async function viewGdpr(view, ctx) {
     host.replaceChildren();
     append(host, [
       h("ol", { class: "steps" },
-        step(r ? "done" : "active", "Purge DAG iceberg_gdpr_purge", r ? `${r.tasks.map((t) => `${t.task_id} ${t.state}`).join(" · ")} · ${fmt.secs(r.wall_seconds)} wall` : (tasks.length ? tasks[tasks.length - 1] : "triggering the Airflow run…")),
+        step(r ? "done" : "active", "Purge running", r ? `${r.tasks.map((t) => `${t.task_id} ${t.state}`).join(" · ")} · ${fmt.secs(r.wall_seconds)} wall` : (tasks.length ? tasks[tasks.length - 1] : "triggering the Airflow run…")),
         step(r ? "done" : "", "Files rewritten, history expired", r ? h("div", { class: "pair-stat" },
           h("div", {}, "Data files", h("b", { text: `${fmt.int(r.files_before.data_files)} → ${fmt.int(r.files_after.data_files)}` })),
           h("div", {}, "Delete files", h("b", { text: `${fmt.int(r.files_before.delete_files)} → ${fmt.int(r.files_after.delete_files)}` })),
@@ -1665,13 +1663,13 @@ async function viewGdpr(view, ctx) {
   const showBtn = button("Show customer", () => loadSubject(keyInput.value.trim()), { kind: "" });
   view.append(h("div", { class: "split" },
     h("div", { class: "stack", style: "gap:20px" },
-      card("Erasure request", "the data subject", h("div", { class: "stack" },
-        h("p", { class: "dim", style: "margin:0", text: "A customer asks to be forgotten. The operational database deletes their row and their orders; the lakehouse must forget them too, including its history." }),
+      card("Erasure request", null, h("div", { class: "stack" },
+        h("p", { class: "dim", style: "margin:0", text: "A customer asks to be forgotten." }),
         h("div", { class: "row", style: "align-items:end" }, h("label", { class: "field", style: "flex:1" }, h("span", { text: "Customer key" }), keyInput), showBtn, randomBtn),
         subjectHost,
         h("div", {}, eraseBtn))),
       purgeCard),
-    card("What the lakehouse sees", "every timestamp is measured, not estimated", story)));
+    card("What the lakehouse sees", null, story)));
   keyInput.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); loadSubject(keyInput.value.trim()); } });
   loadSubject("");
 }
@@ -1709,8 +1707,8 @@ async function viewValidate(view, ctx) {
       ], r.tables));
   }
 
-  view.append(card("PostgreSQL vs Iceberg", null, h("div", { class: "stack" },
-    h("p", { class: "dim", style: "margin:0", text: "Trino reads both catalogs and compares, for every table, the row count and an order-independent checksum over every shared column: checksum(row(CAST(col AS varchar), …)). The pipeline's own metadata columns are excluded." }),
+  view.append(card("Do both copies match?", null, h("div", { class: "stack" },
+    h("p", { class: "dim", style: "margin:0", text: "Compares every row in PostgreSQL with the lakehouse." }),
     warn,
     h("div", { class: "row" }, runBtn, h("label", { class: "check", for: "wait" }, wait, "Wait until consistent (up to 5 min)")),
     out)));
@@ -1718,7 +1716,7 @@ async function viewValidate(view, ctx) {
   ctx.every(4000, async () => {
     const wl = await api("/api/workload");
     warn.replaceChildren(wl.running ? h("div", { class: "banner" }, h("div", {}, h("h3", { text: "The workload is running" }),
-      h("p", { text: "Rows change while they are compared. Stop the workload on the Overview page, or tick “wait until consistent”." }))) : "");
+      h("p", { text: "Data is still changing. Stop the workload first, or tick “wait until consistent”." }))) : "");
   });
 }
 
@@ -1748,17 +1746,17 @@ async function viewResults(view) {
 
   view.append(
     h("div", { class: "kpis" },
-      kpi("Bulk ingestion", il ? fmt.int(il.end_to_end_rows_per_second) : "—", "rows/s", il ? `${fmt.int(il.total_rows)} rows queryable in ${fmt.secs(il.seconds_until_queryable_in_lakehouse)}` : ""),
-      kpi("Freshness p50", fr ? fmt.num(fr.end_to_end_seconds.p50, 1) : "—", "s", fr ? `p95 ${fmt.num(fr.end_to_end_seconds.p95, 1)} s under 100 ops/s` : ""),
-      kpi("Query suite", `${(sumB / sumA).toFixed(2)}×`, "faster", `${fmt.ms(sumB)} → ${fmt.ms(sumA)} total, ${b.runs_per_query} runs each`),
-      kpi("Delete files", `${fmt.int(delB)} → ${fmt.int(delA)}`, null, "merge-on-read deletes compacted away"),
-      kpi("Objects in MinIO", objB ? `−${Math.round((1 - objA / objB) * 100)}` : "—", objB ? "%" : null, `${fmt.int(objB)} → ${fmt.int(objA)} objects, bytes unchanged`)),
+      kpi("Initial load", il ? fmt.int(il.end_to_end_rows_per_second) : "—", "rows/s", il ? `${fmt.int(il.total_rows)} rows in ${fmt.secs(il.seconds_until_queryable_in_lakehouse)}` : ""),
+      kpi("Typical delay", fr ? fmt.num(fr.end_to_end_seconds.p50, 1) : "—", "s", fr ? `95% within ${fmt.num(fr.end_to_end_seconds.p95, 1)} s` : ""),
+      kpi("Query suite", `${(sumB / sumA).toFixed(2)}×`, "faster", `${fmt.ms(sumB)} → ${fmt.ms(sumA)}`),
+      kpi("Leftover delete files", `${fmt.int(delB)} → ${fmt.int(delA)}`, null, "after clean-up"),
+      kpi("Files in storage", objB ? `−${Math.round((1 - objA / objB) * 100)}` : "—", objB ? "%" : null, `${fmt.int(objB)} → ${fmt.int(objA)} files`)),
     h("div", { class: "split-r" },
-      card("Query latency before and after optimisation", "median wall time", h("div", { class: "stack" },
-        h("div", { class: "legend-row" }, h("span", {}, h("i", { style: "background:var(--line-2)" }), "before"), h("span", {}, h("i", { style: "background:var(--accent-strong)" }), "after layout optimisation")),
+      card("Query speed before and after clean-up", null, h("div", { class: "stack" },
+        h("div", { class: "legend-row" }, h("span", {}, h("i", { style: "background:var(--line-2)" }), "before"), h("span", {}, h("i", { style: "background:var(--accent-strong)" }), "after clean-up")),
         bars,
-        h("p", { class: "muted", style: "margin:0;font-size:12.5px", text: "Q06 scans the whole table either way, so sorting and partitioning cannot help it." }))),
-      card("Optimisation run", `${fmt.secs(b.optimization.wall_seconds)} wall, Airflow DAG`, dataTable([
+        h("p", { class: "muted", style: "margin:0;font-size:12.5px", text: "Q06 reads the whole table, so it cannot get faster." }))),
+      card("Optimisation run", `took ${fmt.secs(b.optimization.wall_seconds)}`, dataTable([
         { label: "Task", mono: true, key: "task" },
         { label: "Duration", num: true, render: (t) => fmt.secs(t.duration_s) },
       ], Object.entries(b.optimization.tasks || {}).map(([task, v]) => ({ task, ...v }))))),

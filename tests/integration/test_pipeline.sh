@@ -21,6 +21,13 @@ for _ in $(seq 1 120); do
 done
 [[ "$state" == "exited 0" ]] || fail "Debezium connector registration did not succeed (connect-init: ${state:-missing})"
 
+# The consistency checks need the test to be the only writer: stop the compose workload
+# service and the console's workload if a previous session left either running.
+$DC --profile workload stop generator >/dev/null 2>&1 || true
+for _ in $(seq 1 30); do curl -fsS http://localhost:8090/api/ping >/dev/null 2>&1 && break; sleep 2; done
+curl -fsS -X POST -H "Content-Type: application/json" -H "Origin: http://localhost:8090" \
+  -d '{"action":"stop"}' http://localhost:8090/api/workload >/dev/null || fail "could not stop the console workload"
+
 echo "== load"
 $TOOLS producer.load_tpch --scale tiny --timeout 900 || fail "initial load not consistent"
 
@@ -36,19 +43,25 @@ $TOOLS consumers.validate --wait 300 || fail "delete not propagated"
 echo "== console (web interface)"
 CONSOLE=http://localhost:8090
 json() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
+# the console accepts writes only as same-origin JSON, like its own page sends them
+post() { curl -sS -X POST -H "Content-Type: application/json" -H "Origin: $CONSOLE" "$CONSOLE$1" -d "$2"; }
 for _ in $(seq 1 30); do curl -fsS "$CONSOLE/api/ping" >/dev/null 2>&1 && break; sleep 2; done
 curl -fsS "$CONSOLE/" | grep -q "<title>Floe Console</title>" || fail "console page not served"
 for _ in $(seq 1 30); do
-  health=$(curl -fsS "$CONSOLE/api/status" | json 'f"{d[\"healthy\"]}/{d[\"total\"]}"')
+  health=$(curl -fsS "$CONSOLE/api/status" | json 'str(d["healthy"]) + "/" + str(d["total"])')
   [[ "${health%/*}" == "${health#*/}" ]] && break; sleep 5
 done
 [[ "${health%/*}" == "${health#*/}" ]] || fail "console reports $health components healthy"
-curl -fsS -X POST "$CONSOLE/api/sql" -d '{"sql":"SELECT count(*) FROM lakehouse.shop.region"}' | grep -q '"rows": \[\[5\]\]' \
+post /api/sql '{"sql":"SELECT count(*) FROM lakehouse.shop.region"}' | grep -q '"rows": \[\[5\]\]' \
   || fail "console SQL workbench"
-denied=$(curl -sS -X POST "$CONSOLE/api/sql" -d '{"sql":"EXPLAIN ANALYZE INSERT INTO lakehouse.shop.region SELECT * FROM lakehouse.shop.region"}')
-grep -q "Access Denied" <<<"$denied" || fail "workbench user is not read-only: $denied"
+denied=$(post /api/sql '{"sql":"EXPLAIN ANALYZE INSERT INTO lakehouse.shop.region SELECT * FROM lakehouse.shop.region"}')
+grep -q '"error"' <<<"$denied" || fail "console workbench ran a write: $denied"
+# Trino enforces it too, in case the console's own check were bypassed
+denied=$($DC exec -T trino trino --user workbench --execute \
+  "INSERT INTO lakehouse.shop.region SELECT * FROM lakehouse.shop.region WHERE false" 2>&1 || true)
+grep -q "Access Denied" <<<"$denied" || fail "Trino user workbench is not read-only: $denied"
 balance="$((RUN % 9000 + 100)).$((RUN % 89 + 10))"
-job=$(curl -fsS -X POST "$CONSOLE/api/trace" -d "{\"action\":\"update_customer\",\"key\":3,\"balance\":\"$balance\"}" | json 'd["id"]')
+job=$(post /api/trace "{\"action\":\"update_customer\",\"key\":3,\"balance\":\"$balance\"}" | json 'd["id"]')
 for _ in $(seq 1 90); do
   state=$(curl -fsS "$CONSOLE/api/jobs/$job" | json 'd["state"]'); [[ "$state" != running ]] && break; sleep 2
 done

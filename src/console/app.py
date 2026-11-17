@@ -304,8 +304,8 @@ def check_postgres():
         cur.execute("SELECT current_setting('server_version')")
         version = cur.fetchone()[0].split()[0]
     if not total:
-        return False, "no replication slot yet"
-    return True, f"v{version} · logical slot {'active' if active else 'idle'}"
+        return False, "not connected to the pipeline yet"
+    return True, f"version {version} · {'sending changes' if active else 'idle'}"
 
 
 def check_debezium():
@@ -313,7 +313,7 @@ def check_debezium():
     tasks = st.get("tasks", [])
     ok = st["connector"]["state"] == "RUNNING" and tasks and all(t["state"] == "RUNNING" for t in tasks)
     states = ", ".join(t["state"].lower() for t in tasks) or "no task"
-    return bool(ok), f"connector {st['connector']['state'].lower()} · task {states}"
+    return bool(ok), "capturing changes" if ok else f"stopped ({st['connector']['state'].lower()}, task {states})"
 
 
 def check_kafka():
@@ -322,67 +322,67 @@ def check_kafka():
         pass
     topics = [t for t in _get(f"{CONNECT_URL}/connectors/{CONNECTOR}/topics").json()
               .get(CONNECTOR, {}).get("topics", []) if t.startswith("pg.")]
-    return True, f"KRaft broker · {len(topics)} CDC topics"
+    return True, f"{len(topics)} change streams"
 
 
 def check_spark():
     apps = _get(f"{SPARK_UI_URL}/api/v1/applications").json()
     if not apps:
-        return False, "no application"
+        return False, "not running"
     # A failing stream exits and Docker restarts it, so a crash loop still answers here:
     # only call it healthy once the driver has stayed up past its first micro-batches.
     # (The batch age comes from the exporter via /api/metrics; a health check must not query Trino.)
     up = apps[0]["attempts"][0].get("duration", 0) / 1000
     if up < SPARK_SETTLE_SECONDS:
-        return False, f"started {up:.0f} s ago - if this keeps resetting, check its log"
-    return True, f"streaming job running · up {human_age(up)}"
+        return False, f"starting ({up:.0f} s) - if this repeats, check its log"
+    return True, f"running for {human_age(up)}"
 
 
 def check_iceberg():
-    ns = _get(f"{ICEBERG_REST_URL}/v1/namespaces").json().get("namespaces", [])
-    return True, f"REST catalog · {len(ns)} namespaces"
+    _get(f"{ICEBERG_REST_URL}/v1/namespaces")
+    return True, "online"
 
 
 def check_minio():
     _get(f"{MINIO_URL}/minio/health/live")
-    return True, "S3 warehouse bucket"
+    return True, "storage online"
 
 
 def check_trino():
     info = _get(f"{TRINO_URL}/v1/info").json()
     if info.get("starting"):
         return False, "starting"
-    return True, f"v{info.get('nodeVersion', {}).get('version', '?')} · lakehouse, postgresql, tpch"
+    return True, "ready for queries"
 
 
 def check_airflow():
     h = _get(f"{AIRFLOW_URL}/health").json()
     sched = h.get("scheduler", {}).get("status")
-    return sched == "healthy", f"scheduler {sched or 'unknown'}"
+    return sched == "healthy", "ready" if sched == "healthy" else f"scheduler {sched or 'not responding'}"
 
 
 def check_prometheus():
     _get(f"{PROMETHEUS_URL}/-/ready")
-    return True, "scraping exporter, Spark, MinIO"
+    return True, "collecting"
 
 
 def check_grafana():
     _get(f"{GRAFANA_URL}/api/health")
-    return True, "pipeline dashboard"
+    return True, "online"
 
 
 COMPONENTS = [
     # id, name, role, check, link on the host
-    ("postgres", "PostgreSQL", "Source OLTP database", check_postgres, None),
-    ("debezium", "Debezium", "Change data capture", check_debezium, None),
-    ("kafka", "Kafka", "Change event log", check_kafka, None),
-    ("spark", "Spark", "Structured Streaming MERGE", check_spark, "http://localhost:4040"),
-    ("iceberg", "Iceberg", "REST catalog, table format", check_iceberg, None),
-    ("minio", "MinIO", "Object storage", check_minio, "http://localhost:9001"),
-    ("trino", "Trino", "SQL query engine", check_trino, "http://localhost:8080"),
-    ("airflow", "Airflow", "Maintenance orchestration", check_airflow, "http://localhost:8088"),
-    ("prometheus", "Prometheus", "Metrics", check_prometheus, "http://localhost:9090"),
-    ("grafana", "Grafana", "Dashboards", check_grafana, "http://localhost:3000"),
+    ("postgres", "PostgreSQL", "The source database", check_postgres, None),
+    ("debezium", "Debezium", "Captures every change", check_debezium, None),
+    ("kafka", "Kafka", "Queues the changes", check_kafka, None),
+    ("spark", "Spark", "Writes them to the lakehouse", check_spark, "http://localhost:4040"),
+    ("iceberg", "Iceberg", "The lakehouse tables", check_iceberg, None),
+    ("minio", "MinIO", "File storage", check_minio, "http://localhost:9001"),
+    ("trino", "Trino", "Answers SQL queries", check_trino, "http://localhost:8080"),
+    ("airflow", "Airflow", "Runs the clean-up jobs", check_airflow, "http://localhost:8088"),
+    ("prometheus", "Prometheus", "Collects the numbers", check_prometheus, "http://localhost:9090"),
+    ("grafana", "Grafana", "Monitoring dashboard", check_grafana, "http://localhost:3000"),
 ]
 POOL = ThreadPoolExecutor(max_workers=12, thread_name_prefix="check")
 

@@ -250,15 +250,11 @@ table.data td.wrap { white-space: normal; }
 .flow-links .broken { stroke: var(--alert); stroke-dasharray: 5 6; opacity: 1; }
 .flow-packet {
   position: absolute; left: 0; top: 0; z-index: 0; pointer-events: none;
-  width: 38px; height: 4px; border-radius: 2px;
+  width: 64px; height: 3px; border-radius: 3px;
   offset-rotate: auto; offset-anchor: 100% 50%;
-  background: linear-gradient(90deg, transparent, var(--accent-strong));
+  background: linear-gradient(90deg, transparent 0%, color-mix(in srgb, var(--accent) 45%, transparent) 55%, var(--accent-strong) 92%, transparent 100%);
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--accent) 70%, transparent));
   animation: flow-run var(--run) linear var(--delay) infinite;
-}
-.flow-packet::after {
-  content: ""; position: absolute; right: -4px; top: -3px; width: 10px; height: 10px; border-radius: 50%;
-  background: var(--accent-strong);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 30%, transparent), 0 0 16px var(--accent);
 }
 @keyframes flow-run { from { offset-distance: 0%; } to { offset-distance: 100%; } }
 .flow.live > .node { animation: stage-glow var(--period) ease-out var(--pulse-delay) infinite; }
